@@ -24,8 +24,12 @@ jobs:
           flags="-O2"
           if [ "$SANITIZE" = true ]; then
             flags="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+            # Distribution libtool can use its configured GCC when linking
+            # shared libraries. Keep each sanitizer runtime in one toolchain.
+            make test-native CFLAGS="$flags" LDFLAGS="$flags"
+          else
+            make all test CFLAGS="$flags" LDFLAGS="$flags"
           fi
-          make all test CFLAGS="$flags" LDFLAGS="$flags"
       - name: Verify freestanding utilities have no undefined symbols
         env:
           CC: ${{ matrix.compiler }}
