@@ -1,0 +1,17 @@
+.DS_Store
+.idea/
+.libs/
+*.o
+*.lo
+*.la
+*.dSYM/
+bin/unterm
+bin/vterm-ctrl
+bin/vterm-dump
+t/harness
+t/harness-native
+t/utils
+t/output
+__distdir/
+libvterm-*/
+libvterm-*.tar.gz

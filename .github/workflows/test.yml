@@ -1,0 +1,35 @@
+name: test
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+        sanitize: [false, true]
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y libtool-bin
+      - name: Build and test
+        env:
+          CC: ${{ matrix.compiler }}
+          SANITIZE: ${{ matrix.sanitize }}
+        run: |
+          flags="-O2"
+          if [ "$SANITIZE" = true ]; then
+            flags="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          fi
+          make all test CFLAGS="$flags" LDFLAGS="$flags"
+      - name: Verify freestanding utilities have no undefined symbols
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          "$CC" -std=c99 -O2 -ffreestanding -fno-stack-protector -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -msoft-float -mcmodel=kernel -fno-pic -fno-pie -c src/lib/utils.c -o /tmp/vterm-utils.o
+          nm -u /tmp/vterm-utils.o > /tmp/vterm-utils-undefined.txt
+          cat /tmp/vterm-utils-undefined.txt
+          test ! -s /tmp/vterm-utils-undefined.txt
