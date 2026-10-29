@@ -32,6 +32,82 @@ static void expect(VTerm *vt, int callback, size_t capacity, const char *bytes, 
     received_len = 0;
 }
 
+typedef struct {
+    void *blocks[32];
+    void *last;
+    size_t live;
+    int fail;
+} Allocations;
+
+static void *allocate(size_t size, void *user) {
+    Allocations *allocations = user;
+    if (allocations->fail)
+        return NULL;
+    for (size_t i = 0; i < sizeof(allocations->blocks) / sizeof(allocations->blocks[0]); i++) {
+        if (!allocations->blocks[i]) {
+            void *block = calloc(1, size);
+            CHECK(block != NULL);
+            allocations->blocks[i] = block;
+            allocations->last = block;
+            allocations->live++;
+            return block;
+        }
+    }
+    CHECK(0);
+    return NULL;
+}
+
+static void release(void *block, void *user) {
+    Allocations *allocations = user;
+    if (!block)
+        return;
+    for (size_t i = 0; i < sizeof(allocations->blocks) / sizeof(allocations->blocks[0]); i++) {
+        if (allocations->blocks[i] == block) {
+            allocations->blocks[i] = NULL;
+            allocations->live--;
+            free(block);
+            return;
+        }
+    }
+    CHECK(0); /* A borrowed buffer must never be freed by libvterm. */
+}
+
+static void test_selection_ownership(void) {
+    const VTermAllocatorFunctions allocator = { .malloc = allocate, .free = release };
+    for (int borrowed_at_exit = 0; borrowed_at_exit <= 1; borrowed_at_exit++) {
+        Allocations allocations = {0};
+        VTerm *vt = vterm_build(&(struct VTermBuilder){
+            .rows = 2, .cols = 8, .allocator = &allocator, .allocdata = &allocations,
+        });
+        CHECK(vt != NULL);
+        VTermState *state = vterm_obtain_state(vt);
+        CHECK(state != NULL);
+        size_t base = allocations.live;
+        vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 16);
+        CHECK(allocations.live == base + 1);
+        vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 32);
+        CHECK(allocations.live == base + 1);
+        /* Re-registering the same pointer preserves library ownership. */
+        vterm_state_set_selection_callbacks(state, NULL, NULL, allocations.last, 32);
+        CHECK(allocations.live == base + 1);
+        allocations.fail = 1;
+        vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 64);
+        CHECK(allocations.live == base + 1);
+        allocations.fail = 0;
+        char borrowed[16];
+        vterm_state_set_selection_callbacks(state, NULL, NULL, borrowed, sizeof(borrowed));
+        CHECK(allocations.live == base);
+        vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 16);
+        CHECK(allocations.live == base + 1);
+        vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 0);
+        CHECK(allocations.live == base);
+        vterm_state_set_selection_callbacks(state, NULL, NULL,
+                                            borrowed_at_exit ? borrowed : NULL, 16);
+        vterm_free(vt);
+        CHECK(allocations.live == 0);
+    }
+}
+
 int main(void) {
     for (int callback = 0; callback <= 1; callback++) {
         for (size_t capacity = 1; capacity <= 32; capacity++) {
@@ -58,6 +134,7 @@ int main(void) {
             vterm_free(vt);
         }
     }
-    printf("output: %u checks passed (small buffers and embedded NUL)\n", checks);
+    test_selection_ownership();
+    printf("integration: %u checks passed (output buffers and allocation ownership)\n", checks);
     return 0;
 }

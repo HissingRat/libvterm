@@ -73,6 +73,7 @@ static VTermState *vterm_state_new(VTerm *vt) {
     state->selection.callbacks = NULL;
     state->selection.user = NULL;
     state->selection.buffer = NULL;
+    state->selection.buffer_owned = false;
 
     vterm_state_newpen(state);
 
@@ -102,6 +103,8 @@ INTERNAL void vterm_state_free(VTermState *state) {
     if (state->lineinfos[BUFIDX_ALTSCREEN])
         vterm_allocator_free(state->vt, state->lineinfos[BUFIDX_ALTSCREEN]);
     vterm_allocator_free(state->vt, state->combine_chars);
+    if (state->selection.buffer_owned)
+        vterm_allocator_free(state->vt, state->selection.buffer);
     vterm_allocator_free(state->vt, state);
 }
 
@@ -2277,13 +2280,22 @@ const VTermLineInfo *vterm_state_get_lineinfo(const VTermState *state, int row) 
 
 void vterm_state_set_selection_callbacks(VTermState *state, const VTermSelectionCallbacks *callbacks, void *user,
                                          char *buffer, size_t buflen) {
-    if (buflen && !buffer)
+    bool buffer_owned = buffer && buffer == state->selection.buffer && state->selection.buffer_owned;
+    if (buflen && !buffer) {
         buffer = vterm_allocator_malloc(state->vt, buflen);
+        if (!buffer)
+            return;
+        buffer_owned = true;
+    }
+
+    if (state->selection.buffer_owned && buffer != state->selection.buffer)
+        vterm_allocator_free(state->vt, state->selection.buffer);
 
     state->selection.callbacks = callbacks;
     state->selection.user = user;
     state->selection.buffer = buffer;
     state->selection.buflen = buflen;
+    state->selection.buffer_owned = buffer_owned;
 }
 
 void vterm_state_send_selection(VTermState *state, VTermSelectionMask mask, VTermStringFragment frag) {

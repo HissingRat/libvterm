@@ -68,3 +68,6 @@ Darwin libc mishandles that boundary. See C11 draft N1570, section 7.21.6.1:
 https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf.
 GitHub Actions runs the suite with GCC/Clang, with and without ASan/UBSan,
 and checks that the freestanding utilities object has no undefined symbols.
+Integration tests also verify selection-buffer ownership: internally allocated
+buffers are released on replacement/destruction, borrowed buffers are retained,
+and allocation failure preserves the previous configuration.

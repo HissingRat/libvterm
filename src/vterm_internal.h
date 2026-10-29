@@ -173,6 +173,7 @@ struct VTermState {
         void *user;
         char *buffer;
         size_t buflen;
+        bool buffer_owned;
     } selection;
 };
 
