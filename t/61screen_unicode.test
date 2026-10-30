@@ -2,6 +2,19 @@ INIT
 UTF8 1
 WANTSCREEN
 
+!ASCII-leading UTF-8 split across input calls shares decoder state
+RESET
+PUSH "A\xE4"
+PUSH "\xB8\xAD"
+  ?screen_cell 0,1 = {0x4e2d} width=2 attrs={} fg=rgb(240,240,240) bg=rgb(0,0,0)
+
+!Reset discards a pending shared UTF-8 sequence
+RESET
+PUSH "\xE4"
+RESET
+PUSH "\xB8\xAD"
+  ?screen_row 0 = 0xfffd,0xfffd
+
 !Single width UTF-8
 # U+00C1 = 0xC3 0x81  name: LATIN CAPITAL LETTER A WITH ACUTE
 # U+00E9 = 0xC3 0xA9  name: LATIN SMALL LETTER E WITH ACUTE

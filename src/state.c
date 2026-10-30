@@ -319,6 +319,12 @@ static int on_text_impl(const char bytes[], size_t len, void *user) {
                             ? &state->encoding_utf8
                             : &state->encoding[state->gr_set];
 
+    /* UTF-8 is one byte stream, even when an ASCII-leading call selected a
+     * UTF-8-designated GL slot. A subsequent continuation-leading call selects
+     * encoding_utf8; both must retain the same partial-codepoint state. */
+    if (encoding->enc == state->encoding_utf8.enc)
+        encoding = &state->encoding_utf8;
+
     if (!maxpoints) {
         vt_error(state->vt, VTERM_ERR_NO_SPACE);
         return 0;
@@ -2146,6 +2152,9 @@ static void vterm_state_reset_impl(VTermState *state, int hard) {
         if (default_enc->init)
             (*default_enc->init)(default_enc, state->encoding[i].data);
     }
+    /* Reset must also discard a partial codepoint in the shared decoder. */
+    if (state->encoding_utf8.enc->init)
+        (*state->encoding_utf8.enc->init)(state->encoding_utf8.enc, state->encoding_utf8.data);
 
     state->gl_set = 0;
     state->gr_set = 1;

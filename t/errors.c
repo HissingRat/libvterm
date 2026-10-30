@@ -225,6 +225,57 @@ static void test_combine_and_alt_failure(void) {
     CHECK(vterm_screen_get_cell(scr, (VTermPos){0, 1}, &cell) && cell.chars[0] == 'B');
     destroy(vt, &host);
 }
+static void test_utf8_chunk_boundaries(void) {
+    const char text[] = "A\xc2\xa3" "B\xe4\xb8\xad" "C\xf0\x9f\x99\x82" "De\xcc\x81" "Z";
+    const size_t length = sizeof(text) - 1;
+    Host host = {.fd = -1};
+    VTerm *vt = create(&host);
+    vterm_set_utf8(vt, 1);
+    VTermScreen *scr = screen(vt);
+    CHECK(vterm_set_size(vt, 4, 40) == VTERM_OK);
+    CHECK(vterm_screen_reset(scr, 1) == VTERM_OK);
+    input(vt, text, length);
+    VTermScreenCell expected[40] = {0};
+    for (int col = 0; col < 40; col++)
+        CHECK(vterm_screen_get_cell(scr, (VTermPos){0, col}, &expected[col]));
+    VTermPos expected_cursor;
+    vterm_state_get_cursorpos(vt->state, &expected_cursor);
+    /* Every three-part split, including empty parts and splits inside UTF-8.
+     * Both default UTF-8 GL and explicitly designated ASCII GL must work. */
+    for (int ascii_gl = 0; ascii_gl < 2; ascii_gl++) {
+        for (size_t first = 0; first <= length; first++) {
+            for (size_t second = first; second <= length; second++) {
+                CHECK(vterm_screen_reset(scr, 1) == VTERM_OK);
+                if (ascii_gl) input(vt, "\x1b(B", 3);
+                input(vt, text, first);
+                input(vt, text + first, second - first);
+                input(vt, text + second, length - second);
+                for (int col = 0; col < 40; col++) {
+                    VTermScreenCell cell = {0};
+                    CHECK(vterm_screen_get_cell(scr, (VTermPos){0, col}, &cell));
+                    CHECK(cell.width == expected[col].width);
+                    CHECK(memcmp(cell.chars, expected[col].chars, sizeof(cell.chars)) == 0);
+                }
+                VTermPos cursor;
+                vterm_state_get_cursorpos(vt->state, &cursor);
+                CHECK(cursor.row == expected_cursor.row && cursor.col == expected_cursor.col);
+            }
+        }
+    }
+    for (int hard = 0; hard < 2; hard++) {
+        CHECK(vterm_screen_reset(scr, 1) == VTERM_OK);
+        input(vt, "\xe4", 1);
+        CHECK(vterm_screen_reset(scr, hard) == VTERM_OK);
+        input(vt, "\xb8\xad", 2);
+        for (int col = 0; col < 2; col++) {
+            VTermScreenCell cell = {0};
+            CHECK(vterm_screen_get_cell(scr, (VTermPos){0, col}, &cell));
+            CHECK(cell.chars[0] == 0xfffd);
+        }
+    }
+    destroy(vt, &host);
+}
+
 static VTermStatus text_callback(const char *bytes, size_t len, size_t *consumed, void *user) {
     Host *host = user;
     *consumed = host->text_limit && len > host->text_limit ? host->text_limit : len;
@@ -391,6 +442,7 @@ int main(void) {
     test_construction_failures();
     test_resize_failures();
     test_combine_and_alt_failure();
+    test_utf8_chunk_boundaries();
     test_stream_errors();
     test_parser_limits();
     test_property_errors();
