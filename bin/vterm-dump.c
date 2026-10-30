@@ -1,7 +1,8 @@
+// Feature-test macros must precede every hosted header, including the adapter.
+#define _XOPEN_SOURCE 700
+
 #include <stdlib.h>
 #include "../support/host.h"
-// Require getopt(3)
-#define _XOPEN_SOURCE
 
 #include <stdio.h>
 #include <string.h>
