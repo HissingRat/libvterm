@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include "../support/host.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -172,7 +174,7 @@ void dump_row(int row)
 {
   VTermPos pos = { .row = row, .col = 0 };
   VTermScreenCell prevcell = { 0 };
-  vterm_state_get_default_colors(vterm_obtain_state(vt), &prevcell.fg, &prevcell.bg);
+  vterm_state_get_default_colors(host_state(vt), &prevcell.fg, &prevcell.bg);
 
   while(pos.col < cols) {
     VTermScreenCell cell;
@@ -187,10 +189,10 @@ void dump_row(int row)
   dump_eol(&prevcell);
 }
 
-static int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
+static VTermCallbackResult screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 {
   VTermScreenCell prevcell = { 0 };
-  vterm_state_get_default_colors(vterm_obtain_state(vt), &prevcell.fg, &prevcell.bg);
+  vterm_state_get_default_colors(host_state(vt), &prevcell.fg, &prevcell.bg);
 
   for(int col = 0; col < cols; col++) {
     dump_cell(cells + col, &prevcell);
@@ -199,14 +201,14 @@ static int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user
 
   dump_eol(&prevcell);
 
-  return 1;
+  return host_result(1);
 }
 
-static int screen_resize(int new_rows, int new_cols, void *user)
+static VTermCallbackResult screen_resize(int new_rows, int new_cols, void *user)
 {
   rows = new_rows;
   cols = new_cols;
-  return 1;
+  return host_result(1);
 }
 
 static VTermScreenCallbacks cb_screen = {
@@ -254,18 +256,20 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
-  vt = vterm_new(rows, cols);
+  vt = host_new(rows, cols);
+  /* This offline renderer has no application endpoint for terminal replies. */
+  vterm_output_set_callback(vt, host_discard_output, NULL);
   vterm_set_utf8(vt, true);
 
-  vts = vterm_obtain_screen(vt);
+  vts = host_screen(vt);
   vterm_screen_set_callbacks(vts, &cb_screen, NULL);
 
-  vterm_screen_reset(vts, 1);
+  host_check(vterm_screen_reset(vts, 1));
 
   int len;
   char buffer[1024];
   while((len = read(fd, buffer, sizeof(buffer))) > 0) {
-    vterm_input_write(vt, buffer, len);
+    host_input(vt, buffer, len);
   }
 
   for(int row = 0; row < rows; row++) {

@@ -5,6 +5,7 @@
 #include "lib/utils.h"
 
 #include <stdarg.h>
+#include <limits.h>
 
 #if defined(__GNUC__)
 # define INTERNAL __attribute__((visibility("internal")))
@@ -13,9 +14,9 @@
 #endif
 
 #ifdef DEBUG
-# define DEBUG_LOG(...) fprintf(stderr, __VA_ARGS__)
+# define DEBUG_LOG(vt, ...) vt_log((vt), VTERM_LOG_DEBUG, __VA_ARGS__)
 #else
-# define DEBUG_LOG(...)
+# define DEBUG_LOG(vt, ...)
 #endif
 
 #define ESC_S "\x1b"
@@ -178,7 +179,14 @@ struct VTermState {
 };
 
 struct VTerm {
-    const VTermAllocatorFunctions *allocator;
+    VTermAllocatorFunctions allocator;
+    VTermFatalCallback *fatal;
+    VTermLogCallback *log;
+    void *userdata;
+    VTermStatus error;
+    unsigned int operation_depth;
+    bool resize_committed;
+    bool property_committed;
     void *allocdata;
 
     int rows;
@@ -235,6 +243,7 @@ struct VTerm {
         bool string_initial;
 
         bool emit_nul;
+        bool discard_csi;
     } parser;
 
     /* len == malloc()ed size; cur == number of valid bytes */
@@ -256,7 +265,7 @@ struct VTerm {
 struct VTermEncoding {
     void (*init)(VTermEncoding *enc, void *data);
 
-    void (*decode)(VTermEncoding *enc, void *data,
+    void (*decode)(VTerm *vt, VTermEncoding *enc, void *data,
                    uint32_t cp[], int *cpi, int cplen,
                    const char bytes[], size_t *pos, size_t len);
 };
@@ -267,6 +276,20 @@ typedef enum {
 } VTermEncodingType;
 
 void *vterm_allocator_malloc(VTerm *vt, size_t size);
+INTERNAL void *vt_alloc_array(VTerm *vt, size_t count, size_t size);
+INTERNAL VTermStatus vt_dimensions(int rows, int cols);
+INTERNAL VTermStatus vt_begin(VTerm *vt);
+INTERNAL VTermStatus vt_end(VTerm *vt);
+INTERNAL void vt_error(VTerm *vt, VTermStatus status);
+INTERNAL int vt_callback(VTerm *vt, VTermCallbackResult result);
+INTERNAL VTermCallbackResult vt_result(VTerm *vt, int handled);
+INTERNAL void vt_log(VTerm *vt, VTermLogLevel level, const char *format, ...);
+#if defined(__GNUC__)
+__attribute__((noreturn))
+#endif
+INTERNAL void vt_fatal(VTerm *vt, const char *format, ...);
+INTERNAL int vt_state_set_termprop(VTermState *state, VTermProp prop, VTermValue *val);
+
 
 void vterm_allocator_free(VTerm *vt, void *ptr);
 
@@ -303,6 +326,7 @@ enum {
 void vterm_state_push_output_sprintf_CSI(VTermState *vts, const char *format, ...);
 
 void vterm_screen_free(VTermScreen * screen);
+INTERNAL void vt_screen_resize_notify(VTermScreen *screen);
 
 VTermEncoding *vterm_lookup_encoding(VTermEncodingType type, char designation);
 

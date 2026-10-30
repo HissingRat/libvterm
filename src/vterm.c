@@ -1,81 +1,52 @@
 #include "vterm_internal.h"
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <stdarg.h>
 
 /*****************
  * API functions *
  *****************/
 
-static void *default_malloc(size_t size, void *allocdata) {
-    void *ptr = malloc(size);
-    if (ptr)
-        vt_memset(ptr, 0, size);
-    return ptr;
-}
-
-static void default_free(void *ptr, void *allocdata) {
-    free(ptr);
-}
-
-static VTermAllocatorFunctions default_allocator = {
-    .malloc = &default_malloc,
-    .free = &default_free,
-};
-
-VTerm *vterm_new(int rows, int cols) {
-    return vterm_build(&(const struct VTermBuilder){
-        .rows = rows,
-        .cols = cols,
-    });
-}
-
-VTerm *vterm_new_with_allocator(int rows, int cols, VTermAllocatorFunctions *funcs, void *allocdata) {
-    return vterm_build(&(const struct VTermBuilder){
-        .rows = rows,
-        .cols = cols,
-        .allocator = funcs,
-        .allocdata = allocdata,
-    });
-}
-
-/* A handy macro for defaulting values out of builder fields */
-#define DEFAULT(v, def)  ((v) ? (v) : (def))
-
-VTerm *vterm_build(const struct VTermBuilder *builder) {
-    const VTermAllocatorFunctions *allocator = DEFAULT(builder->allocator, &default_allocator);
-
-    /* Need to bootstrap using the allocator function directly */
-    VTerm *vt = (*allocator->malloc)(sizeof(VTerm), builder->allocdata);
-
-    vt->allocator = allocator;
+VTermStatus vterm_build(const struct VTermBuilder *builder, VTerm **out_vt) {
+    if (!out_vt) return VTERM_ERR_INVALID_ARGUMENT;
+    *out_vt = NULL;
+    if (!builder || !builder->allocator || !builder->allocator->malloc ||
+        !builder->allocator->free || !builder->fatal)
+        return VTERM_ERR_INVALID_ARGUMENT;
+    if (builder->ver != VTERM_API_VERSION)
+        return VTERM_ERR_VERSION_MISMATCH;
+    VTermStatus status = vt_dimensions(builder->rows, builder->cols);
+    if (status != VTERM_OK) return status;
+    size_t outlen = builder->outbuffer_len ? builder->outbuffer_len : 4096;
+    size_t tmplen = builder->tmpbuffer_len ? builder->tmpbuffer_len : 4096;
+    if (outlen < tmplen) return VTERM_ERR_INVALID_ARGUMENT;
+    if (outlen > INT_MAX || tmplen > INT_MAX)
+        return VTERM_ERR_OVERFLOW;
+    VTerm *vt = builder->allocator->malloc(sizeof(*vt), builder->allocdata);
+    if (!vt) return VTERM_ERR_NO_MEMORY;
+    vt_memset(vt, 0, sizeof(*vt));
+    vt->allocator = *builder->allocator;
     vt->allocdata = builder->allocdata;
-
+    vt->fatal = builder->fatal;
+    vt->log = builder->log;
+    vt->userdata = builder->userdata;
     vt->rows = builder->rows;
     vt->cols = builder->cols;
-
     vt->parser.state = NORMAL;
-
-    vt->parser.callbacks = NULL;
-    vt->parser.cbdata = NULL;
-
-    vt->parser.emit_nul = false;
-
-    vt->outfunc = NULL;
-    vt->outdata = NULL;
-
-    vt->outbuffer_len = DEFAULT(builder->outbuffer_len, 4096);
-    vt->outbuffer_cur = 0;
-    vt->outbuffer = vterm_allocator_malloc(vt, vt->outbuffer_len);
-
-    vt->tmpbuffer_len = DEFAULT(builder->tmpbuffer_len, 4096);
-    vt->tmpbuffer = vterm_allocator_malloc(vt, vt->tmpbuffer_len);
-
-    return vt;
+    vt->outbuffer_len = outlen;
+    vt->tmpbuffer_len = tmplen;
+    vt->outbuffer = vterm_allocator_malloc(vt, outlen);
+    vt->tmpbuffer = vterm_allocator_malloc(vt, tmplen);
+    if (!vt->outbuffer || !vt->tmpbuffer) {
+        status = vt->error;
+        vterm_free(vt);
+        return status;
+    }
+    *out_vt = vt;
+    return VTERM_OK;
 }
 
 void vterm_free(VTerm *vt) {
+    if (!vt) return;
     if (vt->screen)
         vterm_screen_free(vt->screen);
 
@@ -89,11 +60,17 @@ void vterm_free(VTerm *vt) {
 }
 
 INTERNAL void *vterm_allocator_malloc(VTerm *vt, size_t size) {
-    return (*vt->allocator->malloc)(size, vt->allocdata);
+    void *ptr = vt->allocator.malloc(size, vt->allocdata);
+    if (!ptr) {
+        vt_error(vt, VTERM_ERR_NO_MEMORY);
+        return NULL;
+    }
+    vt_memset(ptr, 0, size);
+    return ptr;
 }
 
 INTERNAL void vterm_allocator_free(VTerm *vt, void *ptr) {
-    (*vt->allocator->free)(ptr, vt->allocdata);
+    if (ptr) vt->allocator.free(ptr, vt->allocdata);
 }
 
 void vterm_get_size(const VTerm *vt, int *rowsp, int *colsp) {
@@ -103,15 +80,21 @@ void vterm_get_size(const VTerm *vt, int *rowsp, int *colsp) {
         *colsp = vt->cols;
 }
 
-void vterm_set_size(VTerm *vt, int rows, int cols) {
-    if (rows < 1 || cols < 1)
-        return;
-
-    vt->rows = rows;
-    vt->cols = cols;
-
-    if (vt->parser.callbacks && vt->parser.callbacks->resize)
-        (*vt->parser.callbacks->resize)(rows, cols, vt->parser.cbdata);
+VTermStatus vterm_set_size(VTerm *vt, int rows, int cols) {
+    if (!vt) return VTERM_ERR_INVALID_ARGUMENT;
+    VTermStatus status = vt_dimensions(rows, cols);
+    if (status != VTERM_OK) return status;
+    vt_begin(vt);
+    vt->resize_committed = false;
+    if (rows != vt->rows || cols != vt->cols) {
+        if (vt->parser.callbacks && vt->parser.callbacks->resize)
+            vt_callback(vt, vt->parser.callbacks->resize(rows, cols, vt->parser.cbdata));
+        if (vt->error == VTERM_OK || vt->resize_committed) {
+            vt->rows = rows;
+            vt->cols = cols;
+        }
+    }
+    return vt_end(vt);
 }
 
 int vterm_get_utf8(const VTerm *vt) {
@@ -127,23 +110,34 @@ void vterm_output_set_callback(VTerm *vt, VTermOutputCallback *func, void *user)
     vt->outdata = user;
 }
 
+VTermStatus vterm_output_flush(VTerm *vt) {
+    if (vt_begin(vt) != VTERM_OK) return VTERM_ERR_INVALID_ARGUMENT;
+    if (vt->error == VTERM_OK && vt->outfunc && vt->outbuffer_cur) {
+        VTermStatus status = vt->outfunc(vt->outbuffer, vt->outbuffer_cur, vt->outdata);
+        if (status == VTERM_OK)
+            vt->outbuffer_cur = 0;
+        else
+            vt_error(vt, status);
+    }
+    return vt_end(vt);
+}
+
 INTERNAL void vterm_push_output_bytes(VTerm *vt, const char *bytes, size_t len) {
-    if (vt->outfunc) {
-        (vt->outfunc)(bytes, len, vt->outdata);
+    if (len > vt->outbuffer_len - vt->outbuffer_cur) {
+        vt_error(vt, VTERM_ERR_NO_SPACE);
         return;
     }
-
-    if (len > vt->outbuffer_len - vt->outbuffer_cur)
-        return;
-
     vt_memcpy(vt->outbuffer + vt->outbuffer_cur, bytes, len);
     vt->outbuffer_cur += len;
+    vterm_output_flush(vt);
 }
 
 INTERNAL void vterm_push_output_vsprintf(VTerm *vt, const char *format, va_list args) {
     int len = vt_vsnprintf(vt->tmpbuffer, vt->tmpbuffer_len, format, args);
-    if (len < 0 || (size_t)len >= vt->tmpbuffer_len)
+    if (len < 0 || (size_t)len >= vt->tmpbuffer_len) {
+        vt_error(vt, len < 0 ? VTERM_ERR_INVALID_ARGUMENT : VTERM_ERR_NO_SPACE);
         return;
+    }
 
     vterm_push_output_bytes(vt, vt->tmpbuffer, (size_t)len);
 }
@@ -165,16 +159,20 @@ INTERNAL void vterm_push_output_sprintf_ctrl(VTerm *vt, unsigned char ctrl, cons
         cur = vt_snprintf(vt->tmpbuffer, vt->tmpbuffer_len,
                        "%c", ctrl);
 
-    if (cur >= vt->tmpbuffer_len)
+    if (cur >= vt->tmpbuffer_len) {
+        vt_error(vt, VTERM_ERR_NO_SPACE);
         return;
+    }
 
     va_list args;
     va_start(args, fmt);
     int len = vt_vsnprintf(vt->tmpbuffer + cur, vt->tmpbuffer_len - cur, fmt, args);
     va_end(args);
 
-    if (len < 0 || (size_t)len >= vt->tmpbuffer_len - cur)
+    if (len < 0 || (size_t)len >= vt->tmpbuffer_len - cur) {
+        vt_error(vt, len < 0 ? VTERM_ERR_INVALID_ARGUMENT : VTERM_ERR_NO_SPACE);
         return;
+    }
     cur += (size_t)len;
 
     vterm_push_output_bytes(vt, vt->tmpbuffer, cur);
@@ -191,8 +189,10 @@ INTERNAL void vterm_push_output_sprintf_str(VTerm *vt, unsigned char ctrl, bool 
             cur = vt_snprintf(vt->tmpbuffer, vt->tmpbuffer_len,
                            "%c", ctrl);
 
-        if (cur >= vt->tmpbuffer_len)
-            return;
+        if (cur >= vt->tmpbuffer_len) {
+        vt_error(vt, VTERM_ERR_NO_SPACE);
+        return;
+    }
     }
 
     va_list args;
@@ -200,16 +200,20 @@ INTERNAL void vterm_push_output_sprintf_str(VTerm *vt, unsigned char ctrl, bool 
     int len = vt_vsnprintf(vt->tmpbuffer + cur, vt->tmpbuffer_len - cur, fmt, args);
     va_end(args);
 
-    if (len < 0 || (size_t)len >= vt->tmpbuffer_len - cur)
+    if (len < 0 || (size_t)len >= vt->tmpbuffer_len - cur) {
+        vt_error(vt, len < 0 ? VTERM_ERR_INVALID_ARGUMENT : VTERM_ERR_NO_SPACE);
         return;
+    }
     cur += (size_t)len;
 
     if (term) {
         cur += vt_snprintf(vt->tmpbuffer + cur, vt->tmpbuffer_len - cur,
                         vt->mode.ctrl8bit ? "\x9C" : ESC_S "\\"); // ST
 
-        if (cur >= vt->tmpbuffer_len)
-            return;
+        if (cur >= vt->tmpbuffer_len) {
+        vt_error(vt, VTERM_ERR_NO_SPACE);
+        return;
+    }
     }
 
     vterm_push_output_bytes(vt, vt->tmpbuffer, cur);
@@ -278,20 +282,25 @@ VTermValueType vterm_get_prop_type(VTermProp prop) {
     return 0; /* UNREACHABLE */
 }
 
-void vterm_scroll_rect(VTermRect rect,
+VTermStatus vterm_scroll_rect(VTermRect rect,
                        int downward,
                        int rightward,
-                       int (*moverect)(VTermRect src, VTermRect dest, void *user),
-                       int (*eraserect)(VTermRect rect, int selective, void *user),
+                       VTermCallbackResult (*moverect)(VTermRect src, VTermRect dest, void *user),
+                       VTermCallbackResult (*eraserect)(VTermRect rect, int selective, void *user),
                        void *user) {
+    if (!eraserect) return VTERM_ERR_INVALID_ARGUMENT;
+    int64_t height = (int64_t)rect.end_row - rect.start_row;
+    int64_t width = (int64_t)rect.end_col - rect.start_col;
+    if (height < 0 || width < 0) return VTERM_ERR_INVALID_ARGUMENT;
+    if (height > INT_MAX || width > INT_MAX) return VTERM_ERR_OVERFLOW;
+    VTermStatus status = VTERM_OK;
     VTermRect src;
     VTermRect dest;
 
-    if (vt_abs(downward) >= rect.end_row - rect.start_row ||
-        vt_abs(rightward) >= rect.end_col - rect.start_col) {
+    if (downward >= rect.end_row - rect.start_row || downward <= -(rect.end_row - rect.start_row) ||
+        rightward >= rect.end_col - rect.start_col || rightward <= -(rect.end_col - rect.start_col)) {
         /* Scroll more than area; just erase the lot */
-        (*eraserect)(rect, 0, user);
-        return;
+        return (*eraserect)(rect, 0, user).status;
     }
 
     if (rightward >= 0) {
@@ -329,7 +338,7 @@ void vterm_scroll_rect(VTermRect rect,
     }
 
     if (moverect)
-        (*moverect)(dest, src, user);
+        status = (*moverect)(dest, src, user).status;
 
     if (downward > 0)
         rect.start_row = rect.end_row - downward;
@@ -341,7 +350,8 @@ void vterm_scroll_rect(VTermRect rect,
     else if (rightward < 0)
         rect.end_col = rect.start_col - rightward;
 
-    (*eraserect)(rect, 0, user);
+    VTermStatus erased = (*eraserect)(rect, 0, user).status;
+    return status != VTERM_OK ? status : erased;
 }
 
 void vterm_copy_cells(VTermRect dest,
@@ -382,18 +392,7 @@ void vterm_copy_cells(VTermRect dest,
         }
 }
 
-void vterm_check_version(int major, int minor) {
-    if (major != VTERM_VERSION_MAJOR) {
-        fprintf(stderr, "libvterm major version mismatch; %d (wants) != %d (library)\n",
-                major, VTERM_VERSION_MAJOR);
-        exit(1);
-    }
-
-    if (minor > VTERM_VERSION_MINOR) {
-        fprintf(stderr, "libvterm minor version mismatch; %d (wants) > %d (library)\n",
-                minor, VTERM_VERSION_MINOR);
-        exit(1);
-    }
-
-    // Happy
+VTermStatus vterm_check_version(int major, int minor) {
+    return major == VTERM_VERSION_MAJOR && minor == VTERM_VERSION_MINOR
+        ? VTERM_OK : VTERM_ERR_VERSION_MISMATCH;
 }

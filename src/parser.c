@@ -1,44 +1,40 @@
 #include "vterm_internal.h"
 
-#include <stdio.h>
-
-#undef DEBUG_PARSER
-
 static bool is_intermed(unsigned char c) {
     return c >= 0x20 && c <= 0x2f;
 }
 
 static void do_control(VTerm *vt, unsigned char control) {
     if (vt->parser.callbacks && vt->parser.callbacks->control)
-        if ((*vt->parser.callbacks->control)(control, vt->parser.cbdata))
+        if (vt_callback(vt, (*vt->parser.callbacks->control)(control, vt->parser.cbdata)))
             return;
 
-    DEBUG_LOG("libvterm: Unhandled control 0x%02x\n", control);
+    DEBUG_LOG(vt, "libvterm: Unhandled control 0x%02x\n", control);
 }
 
 static void do_csi(VTerm *vt, char command) {
 #ifdef DEBUG_PARSER
-    printf("Parsed CSI args as:\n", arglen, args);
-    printf(" leader: %s\n", vt->parser.v.csi.leader);
+    vt_log(vt, VTERM_LOG_DEBUG, "Parsed CSI args as:\n");
+    vt_log(vt, VTERM_LOG_DEBUG, " leader: %s\n", vt->parser.v.csi.leader);
     for (int argi = 0; argi < vt->parser.v.csi.argi; argi++) {
-        printf(" %lu", CSI_ARG(vt->parser.v.csi.args[argi]));
+        vt_log(vt, VTERM_LOG_DEBUG, " %lu", CSI_ARG(vt->parser.v.csi.args[argi]));
         if (!CSI_ARG_HAS_MORE(vt->parser.v.csi.args[argi]))
-            printf("\n");
-        printf(" intermed: %s\n", vt->parser.intermed);
+            vt_log(vt, VTERM_LOG_DEBUG, "\n");
+        vt_log(vt, VTERM_LOG_DEBUG, " intermed: %s\n", vt->parser.intermed);
     }
 #endif
 
     if (vt->parser.callbacks && vt->parser.callbacks->csi)
-        if ((*vt->parser.callbacks->csi)(
+        if (vt_callback(vt, (*vt->parser.callbacks->csi)(
             vt->parser.v.csi.leaderlen ? vt->parser.v.csi.leader : NULL,
             vt->parser.v.csi.args,
             vt->parser.v.csi.argi,
             vt->parser.intermedlen ? vt->parser.intermed : NULL,
             command,
-            vt->parser.cbdata))
+            vt->parser.cbdata)))
             return;
 
-    DEBUG_LOG("libvterm: Unhandled CSI %c\n", command);
+    DEBUG_LOG(vt, "libvterm: Unhandled CSI %c\n", command);
 }
 
 static void do_escape(VTerm *vt, char command) {
@@ -50,10 +46,10 @@ static void do_escape(VTerm *vt, char command) {
     seq[len] = 0;
 
     if (vt->parser.callbacks && vt->parser.callbacks->escape)
-        if ((*vt->parser.callbacks->escape)(seq, len, vt->parser.cbdata))
+        if (vt_callback(vt, (*vt->parser.callbacks->escape)(seq, len, vt->parser.cbdata)))
             return;
 
-    DEBUG_LOG("libvterm: Unhandled escape ESC 0x%02x\n", command);
+    DEBUG_LOG(vt, "libvterm: Unhandled escape ESC 0x%02x\n", command);
 }
 
 static void string_fragment(VTerm *vt, const char *str, size_t len, bool final) {
@@ -67,28 +63,28 @@ static void string_fragment(VTerm *vt, const char *str, size_t len, bool final) 
     switch (vt->parser.state) {
         case OSC:
             if (vt->parser.callbacks && vt->parser.callbacks->osc)
-                (*vt->parser.callbacks->osc)(vt->parser.v.osc.command, frag, vt->parser.cbdata);
+                vt_callback(vt, (*vt->parser.callbacks->osc)(vt->parser.v.osc.command, frag, vt->parser.cbdata));
             break;
 
         case DCS:
             if (vt->parser.callbacks && vt->parser.callbacks->dcs)
-                (*vt->parser.callbacks->dcs)(vt->parser.v.dcs.command, vt->parser.v.dcs.commandlen, frag,
-                                             vt->parser.cbdata);
+                vt_callback(vt, (*vt->parser.callbacks->dcs)(vt->parser.v.dcs.command, vt->parser.v.dcs.commandlen, frag,
+                                             vt->parser.cbdata));
             break;
 
         case APC:
             if (vt->parser.callbacks && vt->parser.callbacks->apc)
-                (*vt->parser.callbacks->apc)(frag, vt->parser.cbdata);
+                vt_callback(vt, (*vt->parser.callbacks->apc)(frag, vt->parser.cbdata));
             break;
 
         case PM:
             if (vt->parser.callbacks && vt->parser.callbacks->pm)
-                (*vt->parser.callbacks->pm)(frag, vt->parser.cbdata);
+                vt_callback(vt, (*vt->parser.callbacks->pm)(frag, vt->parser.cbdata));
             break;
 
         case SOS:
             if (vt->parser.callbacks && vt->parser.callbacks->sos)
-                (*vt->parser.callbacks->sos)(frag, vt->parser.cbdata);
+                vt_callback(vt, (*vt->parser.callbacks->sos)(frag, vt->parser.cbdata));
             break;
 
         case NORMAL:
@@ -103,9 +99,16 @@ static void string_fragment(VTerm *vt, const char *str, size_t len, bool final) 
     vt->parser.string_initial = false;
 }
 
-size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
+VTermStatus vterm_input_write(VTerm *vt, const char *bytes, size_t len, size_t *consumed) {
+    if (!consumed) return VTERM_ERR_INVALID_ARGUMENT;
+    *consumed = 0;
+    if (!vt || (!bytes && len)) return VTERM_ERR_INVALID_ARGUMENT;
+    if (len > ((1u << 30) - 1)) return VTERM_ERR_OVERFLOW;
+    vt_begin(vt);
+    if (vterm_output_flush(vt) != VTERM_OK) return vt_end(vt);
+    if (!len) return vt_end(vt);
     size_t pos = 0;
-    const char *string_start;
+    const char *string_start = NULL;
 
     switch (vt->parser.state) {
         case NORMAL:
@@ -125,12 +128,18 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
             break;
     }
 
-#define ENTER_STATE(st)        do { vt->parser.state = st; string_start = NULL; } while(0)
+#define ENTER_STATE(st)        do { vt->parser.state = st; vt->parser.discard_csi = false; string_start = NULL; } while(0)
 #define ENTER_NORMAL_STATE()   ENTER_STATE(NORMAL)
 
 #define IS_STRING_STATE()      (vt->parser.state >= OSC_COMMAND)
 
-    for (; pos < len; pos++) {
+    for (; pos < len && vt->error == VTERM_OK; pos++) {
+        /* Keep enough room for one bounded protocol response. Buffered users
+         * drain output and retry only the unconsumed suffix. */
+        if (vt->outbuffer_cur && vt->outbuffer_len - vt->outbuffer_cur < vt->tmpbuffer_len) {
+            vt_error(vt, VTERM_ERR_NO_SPACE);
+            break;
+        }
         unsigned char c = bytes[pos];
         bool c1_allowed = !vt->mode.utf8;
 
@@ -194,6 +203,10 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
             }
         }
 
+        if (vt->parser.discard_csi) {
+            if (c >= 0x40 && c <= 0x7e) ENTER_NORMAL_STATE();
+            continue;
+        }
         switch (vt->parser.state) {
             case CSI_LEADER:
                 /* Extract leader bytes 0x3c to 0x3f */
@@ -216,6 +229,11 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
                 if (c >= '0' && c <= '9') {
                     if (vt->parser.v.csi.args[vt->parser.v.csi.argi] == CSI_ARG_MISSING)
                         vt->parser.v.csi.args[vt->parser.v.csi.argi] = 0;
+                    if (vt->parser.v.csi.args[vt->parser.v.csi.argi] > (CSI_ARG_MISSING - 1 - (c - '0')) / 10) {
+                        vt->parser.discard_csi = true;
+                        vt_error(vt, VTERM_ERR_OVERFLOW);
+                        continue;
+                    }
                     vt->parser.v.csi.args[vt->parser.v.csi.argi] *= 10;
                     vt->parser.v.csi.args[vt->parser.v.csi.argi] += c - '0';
                     break;
@@ -225,6 +243,11 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
                     c = ';';
                 }
                 if (c == ';') {
+                    if (vt->parser.v.csi.argi + 1 >= CSI_ARGS_MAX) {
+                        vt->parser.discard_csi = true;
+                        vt_error(vt, VTERM_ERR_OVERFLOW);
+                        continue;
+                    }
                     vt->parser.v.csi.argi++;
                     vt->parser.v.csi.args[vt->parser.v.csi.argi] = CSI_ARG_MISSING;
                     break;
@@ -255,7 +278,11 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
                 if (c >= '0' && c <= '9') {
                     if (vt->parser.v.osc.command == -1)
                         vt->parser.v.osc.command = 0;
-                    else
+                    else if (vt->parser.v.osc.command > (INT_MAX - (c - '0')) / 10) {
+                        ENTER_NORMAL_STATE();
+                        vt_error(vt, VTERM_ERR_OVERFLOW);
+                        continue;
+                    } else
                         vt->parser.v.osc.command *= 10;
                     vt->parser.v.osc.command += c - '0';
                     break;
@@ -304,7 +331,7 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
                         vt->parser.in_esc = 0;
                         ENTER_NORMAL_STATE();
                     } else {
-                        DEBUG_LOG("TODO: Unhandled byte %02x in Escape\n", c);
+                        DEBUG_LOG(vt, "TODO: Unhandled byte %02x in Escape\n", c);
                     }
                     break;
                 }
@@ -349,12 +376,16 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
                     }
                 } else {
                     size_t eaten = 0;
-                    if (vt->parser.callbacks && vt->parser.callbacks->text)
-                        eaten = (*vt->parser.callbacks->text)(bytes + pos, len - pos, vt->parser.cbdata);
-
-                    if (!eaten) {
-                        DEBUG_LOG("libvterm: Text callback did not consume any input\n");
-                        /* force it to make progress */
+                    if (vt->parser.callbacks && vt->parser.callbacks->text) {
+                        VTermStatus status = vt->parser.callbacks->text(bytes + pos, len - pos, &eaten, vt->parser.cbdata);
+                        if (eaten > len - pos)
+                            vt_fatal(vt, "Text callback consumed beyond input");
+                        vt_error(vt, status);
+                        if (!eaten) {
+                            if (vt->error == VTERM_OK) vt_error(vt, VTERM_ERR_HOST);
+                            goto done;
+                        }
+                    } else {
                         eaten = 1;
                     }
 
@@ -364,14 +395,16 @@ size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len) {
         }
     }
 
-    if (string_start) {
+    if (string_start && vt->error == VTERM_OK) {
         size_t string_len = bytes + pos - string_start;
         if (vt->parser.in_esc)
             string_len -= 1;
         string_fragment(vt, string_start, string_len, false);
     }
 
-    return len;
+done:
+    *consumed = pos;
+    return vt_end(vt);
 }
 
 void vterm_parser_set_callbacks(VTerm *vt, const VTermParserCallbacks *callbacks, void *user) {

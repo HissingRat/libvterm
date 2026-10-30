@@ -35,12 +35,13 @@ TBLFILES=$(sort $(wildcard src/encoding/*.tbl))
 INCFILES=$(TBLFILES:.tbl=.inc)
 
 HFILES_INT=$(sort $(wildcard src/*.h src/lib/*.h)) $(HFILES)
+HOST_HEADERS=support/host.h
 
-VERSION_CURRENT=0
+VERSION_CURRENT=1
 VERSION_REVISION=0
 VERSION_AGE=0
 
-VERSION=0.3.3
+VERSION=0.4.0
 
 PREFIX=/usr/local
 BINDIR=$(PREFIX)/bin
@@ -68,11 +69,11 @@ src/fullwidth.inc:
 
 src/encoding.lo: $(INCFILES)
 
-bin/%: bin/%.c $(LIBRARY)
+bin/%: bin/%.c $(LIBRARY) $(HOST_HEADERS)
 	@echo CC $<
 	@$(LIBTOOL) --mode=link --tag=CC $(CC) $(CFLAGS) -o $@ $< $(LIBRARY) $(LDFLAGS)
 
-t/harness.lo: t/harness.c $(HFILES_INT)
+t/harness.lo: t/harness.c $(HFILES_INT) $(HOST_HEADERS)
 	@echo CC $<
 	@$(LIBTOOL) --mode=compile --tag=CC $(CC) $(CFLAGS) -o $@ -c $<
 
@@ -81,27 +82,45 @@ t/harness: t/harness.lo $(LIBRARY)
 	@$(LIBTOOL) --mode=link --tag=CC $(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 .PHONY: test
-test: $(LIBRARY) t/harness test-utils test-output
+test: $(LIBRARY) t/harness test-utils test-output test-errors
 	for T in `ls t/[0-9]*.test`; do echo "** $$T **"; perl t/run-test.pl $$T $(if $(VALGRIND),--valgrind) || exit 1; done
 
 t/utils: t/utils.c src/lib/utils.c src/lib/utils.h
 	$(CC) $(CFLAGS) -Isrc -o $@ t/utils.c src/lib/utils.c $(LDFLAGS)
 
-.PHONY: test-utils test-output test-native
+.PHONY: test-utils test-output test-errors test-native freestanding
 test-utils: t/utils
 	./t/utils
 
-t/output: t/output.c $(CFILES) $(HFILES_INT) $(INCFILES)
+t/output: t/output.c $(CFILES) $(HFILES_INT) $(INCFILES) $(HOST_HEADERS)
 	$(CC) $(CFLAGS) -o $@ t/output.c $(CFILES) $(LDFLAGS)
 
 test-output: t/output
 	./t/output
 
+t/errors: t/errors.c $(CFILES) $(HFILES_INT) $(INCFILES)
+	$(CC) $(CFLAGS) -o $@ t/errors.c $(CFILES) $(LDFLAGS)
+
+test-errors: t/errors
+	./t/errors
+
+FREESTANDING_CFLAGS ?= -O2 -ffreestanding -fno-stack-protector
+FS_OBJECTS=$(patsubst %.c,.freestanding/%.o,$(CFILES))
+
+freestanding: libvterm.a
+
+libvterm.a: $(FS_OBJECTS)
+	$(AR) rcs $@ $^
+
+.freestanding/%.o: %.c $(HFILES_INT) $(INCFILES)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c99 -Iinclude $(FREESTANDING_CFLAGS) -c $< -o $@
+
 # Run the same suite without requiring GNU libtool on the development host.
-t/harness-native: t/harness.c $(CFILES) $(HFILES_INT) $(INCFILES)
+t/harness-native: t/harness.c $(CFILES) $(HFILES_INT) $(INCFILES) $(HOST_HEADERS)
 	$(CC) $(CFLAGS) -o $@ t/harness.c $(CFILES) $(LDFLAGS)
 
-test-native: t/harness-native test-utils test-output
+test-native: t/harness-native test-utils test-output test-errors
 	@for T in t/[0-9]*.test; do echo "** $$T **"; perl t/run-test.pl --executable ./t/harness-native $$T || exit 1; done
 
 .PHONY: clean
@@ -109,7 +128,8 @@ clean:
 	$(LIBTOOL) --mode=clean rm -f $(OBJECTS) $(INCFILES)
 	$(LIBTOOL) --mode=clean rm -f t/harness.lo t/harness
 	$(LIBTOOL) --mode=clean rm -f $(LIBRARY) $(BINFILES)
-	rm -f t/utils t/output t/harness-native
+	rm -f t/utils t/output t/errors t/freestanding t/harness-native libvterm.a
+	rm -rf .freestanding
 
 .PHONY: install
 install: install-inc install-lib install-bin
@@ -147,7 +167,9 @@ distdir: $(INCFILES)
 	mkdir __distdir/bin
 	cp bin/*.c __distdir/bin
 	mkdir __distdir/t
-	cp t/*.test t/harness.c t/utils.c t/output.c t/run-test.pl __distdir/t
+	cp t/*.test t/harness.c t/utils.c t/output.c t/errors.c t/freestanding.c t/run-test.pl __distdir/t
+	mkdir __distdir/support
+	cp support/host.h __distdir/support
 	sed "s,@VERSION@,$(VERSION)," <vterm.pc.in >__distdir/vterm.pc.in
 	sed "/^# DIST CUT/Q" <Makefile >__distdir/Makefile
 	mv __distdir $(DISTDIR)

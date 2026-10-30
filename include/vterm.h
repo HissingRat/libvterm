@@ -6,14 +6,14 @@ extern "C" {
 #endif
 
 #include <stdint.h>
-#include <stdlib.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 #include "vterm_keycodes.h"
 
 #define VTERM_VERSION_MAJOR 0
-#define VTERM_VERSION_MINOR 3
-#define VTERM_VERSION_PATCH 3
+#define VTERM_VERSION_MINOR 4
+#define VTERM_VERSION_PATCH 0
 
 #define VTERM_CHECK_VERSION \
         vterm_check_version(VTERM_VERSION_MAJOR, VTERM_VERSION_MINOR)
@@ -26,6 +26,29 @@ extern "C" {
 typedef struct VTerm VTerm;
 typedef struct VTermState VTermState;
 typedef struct VTermScreen VTermScreen;
+
+#define VTERM_API_VERSION 1
+
+typedef enum {
+  VTERM_OK = 0,
+  VTERM_ERR_INVALID_ARGUMENT,
+  VTERM_ERR_NO_MEMORY,
+  VTERM_ERR_OVERFLOW,
+  VTERM_ERR_NO_SPACE,
+  VTERM_ERR_HOST,
+  VTERM_ERR_VERSION_MISMATCH
+} VTermStatus;
+
+typedef struct {
+  VTermStatus status;
+  bool handled; /* Also means "row available" for sb_popline; ignored on error. */
+} VTermCallbackResult;
+
+typedef enum { VTERM_LOG_DEBUG, VTERM_LOG_ERROR } VTermLogLevel;
+typedef void VTermLogCallback(void *user, VTermLogLevel level, const char *message, size_t len);
+/* Must not return. The library traps if this contract is violated. */
+typedef void VTermFatalCallback(void *user, const char *message, size_t len);
+
 
 typedef struct {
   int row;
@@ -306,7 +329,8 @@ typedef struct {
 /* Copies of VTermState fields that the 'resize' callback might have reason to
  * edit. 'resize' callback gets total control of these fields and may
  * free-and-reallocate them if required. They will be copied back from the
- * struct after the callback has returned.
+ * struct after the callback has returned. A custom resize callback that
+ * rejects the operation must not free old lineinfos or modify these fields.
  */
 typedef struct {
   VTermPos pos;                /* current cursor position */
@@ -314,65 +338,72 @@ typedef struct {
 } VTermStateFields;
 
 typedef struct {
-  /* libvterm relies on this memory to be zeroed out before it is returned
-   * by the allocator. */
+  /* Required callbacks. malloc returns suitably aligned storage or NULL.
+   * libvterm zeroes storage itself; free must not fail. */
   void *(*malloc)(size_t size, void *allocdata);
   void  (*free)(void *ptr, void *allocdata);
 } VTermAllocatorFunctions;
 
-void vterm_check_version(int major, int minor);
+VTermStatus vterm_check_version(int major, int minor);
 
 struct VTermBuilder {
-  int ver; /* currently unused but reserved for some sort of ABI version flag */
+  int ver; /* Must be VTERM_API_VERSION. */
 
   int rows, cols;
 
-  const VTermAllocatorFunctions *allocator;
+  const VTermAllocatorFunctions *allocator; /* Copied into the instance. */
   void *allocdata;
+  VTermFatalCallback *fatal; /* Required in every build. */
+  VTermLogCallback *log;     /* Optional; NULL disables diagnostics. */
+  void *userdata;
 
   /* Override default sizes for various structures */
   size_t outbuffer_len;  /* default: 4096 */
   size_t tmpbuffer_len;  /* default: 4096 */
 };
 
-VTerm *vterm_build(const struct VTermBuilder *builder);
-
-/* A convenient shortcut for default cases */
-VTerm *vterm_new(int rows, int cols);
-/* This shortcuts are generally discouraged in favour of just using vterm_build() */
-VTerm *vterm_new_with_allocator(int rows, int cols, VTermAllocatorFunctions *funcs, void *allocdata);
+/* Both allocator functions and fatal are mandatory. outbuffer_len must be
+ * >= tmpbuffer_len. On failure *out_vt is NULL and all allocations are freed. */
+VTermStatus vterm_build(const struct VTermBuilder *builder, VTerm **out_vt);
 
 void   vterm_free(VTerm* vt);
 
 void vterm_get_size(const VTerm *vt, int *rowsp, int *colsp);
-void vterm_set_size(VTerm *vt, int rows, int cols);
+/* Validation/OOM failures leave the old size and cells unchanged. Host
+ * notification failures can be reported after a consistent resize commits. */
+VTermStatus vterm_set_size(VTerm *vt, int rows, int cols);
 
 int  vterm_get_utf8(const VTerm *vt);
 void vterm_set_utf8(VTerm *vt, int is_utf8);
 
-size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len);
+/* consumed includes accepted partial UTF-8/escape sequences. On error, only
+ * retry the suffix after consumed, never the whole input. Rejected output
+ * stays queued: retry vterm_output_flush rather than replaying its input.
+ * Host callbacks are synchronous and must not reenter the same instance. */
+VTermStatus vterm_input_write(VTerm *vt, const char *bytes, size_t len, size_t *consumed);
 
 /* Setting output callback will override the buffer logic */
-typedef void VTermOutputCallback(const char *s, size_t len, void *user);
+/* All-or-nothing synchronous acceptance; failed output remains queued. */
+typedef VTermStatus VTermOutputCallback(const char *s, size_t len, void *user);
 void vterm_output_set_callback(VTerm *vt, VTermOutputCallback *func, void *user);
+VTermStatus vterm_output_flush(VTerm *vt);
 
-/* These buffer functions only work if output callback is NOT set
- * These are deprecated and will be removed in a later version */
+/* Queued bytes remain inspectable/readable even after a sink rejects output.
+ * Reading removes bytes from the queue; it does not invoke the output sink. */
 size_t vterm_output_get_buffer_size(const VTerm *vt);
 size_t vterm_output_get_buffer_current(const VTerm *vt);
 size_t vterm_output_get_buffer_remaining(const VTerm *vt);
 
-/* This too */
 size_t vterm_output_read(VTerm *vt, char *buffer, size_t len);
 
-void vterm_keyboard_unichar(VTerm *vt, uint32_t c, VTermModifier mod);
-void vterm_keyboard_key(VTerm *vt, VTermKey key, VTermModifier mod);
+VTermStatus vterm_keyboard_unichar(VTerm *vt, uint32_t c, VTermModifier mod);
+VTermStatus vterm_keyboard_key(VTerm *vt, VTermKey key, VTermModifier mod);
 
-void vterm_keyboard_start_paste(VTerm *vt);
-void vterm_keyboard_end_paste(VTerm *vt);
+VTermStatus vterm_keyboard_start_paste(VTerm *vt);
+VTermStatus vterm_keyboard_end_paste(VTerm *vt);
 
-void vterm_mouse_move(VTerm *vt, int row, int col, VTermModifier mod);
-void vterm_mouse_button(VTerm *vt, int button, bool pressed, VTermModifier mod);
+VTermStatus vterm_mouse_move(VTerm *vt, int row, int col, VTermModifier mod);
+VTermStatus vterm_mouse_button(VTerm *vt, int button, bool pressed, VTermModifier mod);
 
 // ------------
 // Parser layer
@@ -400,16 +431,16 @@ void vterm_mouse_button(VTerm *vt, int button, bool pressed, VTermModifier mod);
 #define CSI_ARG_COUNT(a)      (CSI_ARG(a) == CSI_ARG_MISSING || CSI_ARG(a) == 0 ? 1 : CSI_ARG(a))
 
 typedef struct {
-  int (*text)(const char *bytes, size_t len, void *user);
-  int (*control)(unsigned char control, void *user);
-  int (*escape)(const char *bytes, size_t len, void *user);
-  int (*csi)(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user);
-  int (*osc)(int command, VTermStringFragment frag, void *user);
-  int (*dcs)(const char *command, size_t commandlen, VTermStringFragment frag, void *user);
-  int (*apc)(VTermStringFragment frag, void *user);
-  int (*pm)(VTermStringFragment frag, void *user);
-  int (*sos)(VTermStringFragment frag, void *user);
-  int (*resize)(int rows, int cols, void *user);
+  VTermStatus (*text)(const char *bytes, size_t len, size_t *consumed, void *user);
+  VTermCallbackResult (*control)(unsigned char control, void *user);
+  VTermCallbackResult (*escape)(const char *bytes, size_t len, void *user);
+  VTermCallbackResult (*csi)(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user);
+  VTermCallbackResult (*osc)(int command, VTermStringFragment frag, void *user);
+  VTermCallbackResult (*dcs)(const char *command, size_t commandlen, VTermStringFragment frag, void *user);
+  VTermCallbackResult (*apc)(VTermStringFragment frag, void *user);
+  VTermCallbackResult (*pm)(VTermStringFragment frag, void *user);
+  VTermCallbackResult (*sos)(VTermStringFragment frag, void *user);
+  VTermCallbackResult (*resize)(int rows, int cols, void *user);
 } VTermParserCallbacks;
 
 void  vterm_parser_set_callbacks(VTerm *vt, const VTermParserCallbacks *callbacks, void *user);
@@ -425,40 +456,40 @@ void vterm_parser_set_emit_nul(VTerm *vt, bool emit);
 // -----------
 
 typedef struct {
-  int (*putglyph)(VTermGlyphInfo *info, VTermPos pos, void *user);
-  int (*movecursor)(VTermPos pos, VTermPos oldpos, int visible, void *user);
-  int (*scrollrect)(VTermRect rect, int downward, int rightward, void *user);
-  int (*moverect)(VTermRect dest, VTermRect src, void *user);
-  int (*erase)(VTermRect rect, int selective, void *user);
-  int (*initpen)(void *user);
-  int (*setpenattr)(VTermAttr attr, VTermValue *val, void *user);
-  int (*settermprop)(VTermProp prop, VTermValue *val, void *user);
-  int (*bell)(void *user);
-  int (*resize)(int rows, int cols, VTermStateFields *fields, void *user);
-  int (*setlineinfo)(int row, const VTermLineInfo *newinfo, const VTermLineInfo *oldinfo, void *user);
-  int (*sb_clear)(void *user);
+  VTermCallbackResult (*putglyph)(VTermGlyphInfo *info, VTermPos pos, void *user);
+  VTermCallbackResult (*movecursor)(VTermPos pos, VTermPos oldpos, int visible, void *user);
+  VTermCallbackResult (*scrollrect)(VTermRect rect, int downward, int rightward, void *user);
+  VTermCallbackResult (*moverect)(VTermRect dest, VTermRect src, void *user);
+  VTermCallbackResult (*erase)(VTermRect rect, int selective, void *user);
+  VTermCallbackResult (*initpen)(void *user);
+  VTermCallbackResult (*setpenattr)(VTermAttr attr, VTermValue *val, void *user);
+  VTermCallbackResult (*settermprop)(VTermProp prop, VTermValue *val, void *user);
+  VTermCallbackResult (*bell)(void *user);
+  VTermCallbackResult (*resize)(int rows, int cols, VTermStateFields *fields, void *user);
+  VTermCallbackResult (*setlineinfo)(int row, const VTermLineInfo *newinfo, const VTermLineInfo *oldinfo, void *user);
+  VTermCallbackResult (*sb_clear)(void *user);
   // ABI-compat only enabled if vterm_state_callbacks_has_premove() is invoked
-  int (*premove)(VTermRect dest, void *user);
+  VTermCallbackResult (*premove)(VTermRect dest, void *user);
 } VTermStateCallbacks;
 
 typedef struct {
-  int (*control)(unsigned char control, void *user);
-  int (*csi)(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user);
-  int (*osc)(int command, VTermStringFragment frag, void *user);
-  int (*dcs)(const char *command, size_t commandlen, VTermStringFragment frag, void *user);
-  int (*apc)(VTermStringFragment frag, void *user);
-  int (*pm)(VTermStringFragment frag, void *user);
-  int (*sos)(VTermStringFragment frag, void *user);
+  VTermCallbackResult (*control)(unsigned char control, void *user);
+  VTermCallbackResult (*csi)(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user);
+  VTermCallbackResult (*osc)(int command, VTermStringFragment frag, void *user);
+  VTermCallbackResult (*dcs)(const char *command, size_t commandlen, VTermStringFragment frag, void *user);
+  VTermCallbackResult (*apc)(VTermStringFragment frag, void *user);
+  VTermCallbackResult (*pm)(VTermStringFragment frag, void *user);
+  VTermCallbackResult (*sos)(VTermStringFragment frag, void *user);
 } VTermStateFallbacks;
 
 typedef struct {
-  int (*set)(VTermSelectionMask mask, VTermStringFragment frag, void *user);
-  int (*query)(VTermSelectionMask mask, void *user);
+  VTermCallbackResult (*set)(VTermSelectionMask mask, VTermStringFragment frag, void *user);
+  VTermCallbackResult (*query)(VTermSelectionMask mask, void *user);
 } VTermSelectionCallbacks;
 
-VTermState *vterm_obtain_state(VTerm *vt);
+VTermStatus vterm_obtain_state(VTerm *vt, VTermState **out_state);
 
-void  vterm_state_set_callbacks(VTermState *state, const VTermStateCallbacks *callbacks, void *user);
+VTermStatus vterm_state_set_callbacks(VTermState *state, const VTermStateCallbacks *callbacks, void *user);
 void *vterm_state_get_cbdata(VTermState *state);
 
 void vterm_state_callbacks_has_premove(VTermState *state);
@@ -466,17 +497,17 @@ void vterm_state_callbacks_has_premove(VTermState *state);
 void  vterm_state_set_unrecognised_fallbacks(VTermState *state, const VTermStateFallbacks *fallbacks, void *user);
 void *vterm_state_get_unrecognised_fbdata(VTermState *state);
 
-void vterm_state_reset(VTermState *state, int hard);
+VTermStatus vterm_state_reset(VTermState *state, int hard);
 void vterm_state_get_cursorpos(const VTermState *state, VTermPos *cursorpos);
 void vterm_state_get_default_colors(const VTermState *state, VTermColor *default_fg, VTermColor *default_bg);
 void vterm_state_get_palette_color(const VTermState *state, int index, VTermColor *col);
-void vterm_state_set_default_colors(VTermState *state, const VTermColor *default_fg, const VTermColor *default_bg);
-void vterm_state_set_palette_color(VTermState *state, int index, const VTermColor *col);
-void vterm_state_set_bold_highbright(VTermState *state, int bold_is_highbright);
+VTermStatus vterm_state_set_default_colors(VTermState *state, const VTermColor *default_fg, const VTermColor *default_bg);
+VTermStatus vterm_state_set_palette_color(VTermState *state, int index, const VTermColor *col);
+VTermStatus vterm_state_set_bold_highbright(VTermState *state, int bold_is_highbright);
 int  vterm_state_get_penattr(const VTermState *state, VTermAttr attr, VTermValue *val);
-int  vterm_state_set_termprop(VTermState *state, VTermProp prop, VTermValue *val);
-void vterm_state_focus_in(VTermState *state);
-void vterm_state_focus_out(VTermState *state);
+VTermStatus vterm_state_set_termprop(VTermState *state, VTermProp prop, VTermValue *val, bool *handled);
+VTermStatus vterm_state_focus_in(VTermState *state);
+VTermStatus vterm_state_focus_out(VTermState *state);
 const VTermLineInfo *vterm_state_get_lineinfo(const VTermState *state, int row);
 
 /**
@@ -491,10 +522,10 @@ const VTermLineInfo *vterm_state_get_lineinfo(const VTermState *state, int row);
  */
 void vterm_state_convert_color_to_rgb(const VTermState *state, VTermColor *col);
 
-void vterm_state_set_selection_callbacks(VTermState *state, const VTermSelectionCallbacks *callbacks, void *user,
+VTermStatus vterm_state_set_selection_callbacks(VTermState *state, const VTermSelectionCallbacks *callbacks, void *user,
     char *buffer, size_t buflen);
 
-void vterm_state_send_selection(VTermState *state, VTermSelectionMask mask, VTermStringFragment frag);
+VTermStatus vterm_state_send_selection(VTermState *state, VTermSelectionMask mask, VTermStringFragment frag);
 
 // ------------
 // Screen layer
@@ -536,20 +567,20 @@ typedef struct {
 } VTermScreenCell;
 
 typedef struct {
-  int (*damage)(VTermRect rect, void *user);
-  int (*moverect)(VTermRect dest, VTermRect src, void *user);
-  int (*movecursor)(VTermPos pos, VTermPos oldpos, int visible, void *user);
-  int (*settermprop)(VTermProp prop, VTermValue *val, void *user);
-  int (*bell)(void *user);
-  int (*resize)(int rows, int cols, void *user);
-  int (*sb_pushline)(int cols, const VTermScreenCell *cells, void *user);
-  int (*sb_popline)(int cols, VTermScreenCell *cells, void *user);
-  int (*sb_clear)(void* user);
+  VTermCallbackResult (*damage)(VTermRect rect, void *user);
+  VTermCallbackResult (*moverect)(VTermRect dest, VTermRect src, void *user);
+  VTermCallbackResult (*movecursor)(VTermPos pos, VTermPos oldpos, int visible, void *user);
+  VTermCallbackResult (*settermprop)(VTermProp prop, VTermValue *val, void *user);
+  VTermCallbackResult (*bell)(void *user);
+  VTermCallbackResult (*resize)(int rows, int cols, void *user);
+  VTermCallbackResult (*sb_pushline)(int cols, const VTermScreenCell *cells, void *user);
+  VTermCallbackResult (*sb_popline)(int cols, VTermScreenCell *cells, void *user);
+  VTermCallbackResult (*sb_clear)(void* user);
   /* ABI-compat this is only used if vterm_screen_callbacks_has_pushline4() is called */
-  int (*sb_pushline4)(int cols, const VTermScreenCell *cells, bool continuation, void *user);
+  VTermCallbackResult (*sb_pushline4)(int cols, const VTermScreenCell *cells, bool continuation, void *user);
 } VTermScreenCallbacks;
 
-VTermScreen *vterm_obtain_screen(VTerm *vt);
+VTermStatus vterm_obtain_screen(VTerm *vt, VTermScreen **out_screen);
 
 void  vterm_screen_set_callbacks(VTermScreen *screen, const VTermScreenCallbacks *callbacks, void *user);
 void *vterm_screen_get_cbdata(VTermScreen *screen);
@@ -564,7 +595,7 @@ void vterm_screen_enable_reflow(VTermScreen *screen, bool reflow);
 // Back-compat alias for the brief time it was in 0.3-RC1
 #define vterm_screen_set_reflow  vterm_screen_enable_reflow
 
-void vterm_screen_enable_altscreen(VTermScreen *screen, int altscreen);
+VTermStatus vterm_screen_enable_altscreen(VTermScreen *screen, int altscreen);
 
 typedef enum {
   VTERM_DAMAGE_CELL,    /* every cell */
@@ -575,10 +606,10 @@ typedef enum {
   VTERM_N_DAMAGES
 } VTermDamageSize;
 
-void vterm_screen_flush_damage(VTermScreen *screen);
-void vterm_screen_set_damage_merge(VTermScreen *screen, VTermDamageSize size);
+VTermStatus vterm_screen_flush_damage(VTermScreen *screen);
+VTermStatus vterm_screen_set_damage_merge(VTermScreen *screen, VTermDamageSize size);
 
-void   vterm_screen_reset(VTermScreen *screen, int hard);
+VTermStatus vterm_screen_reset(VTermScreen *screen, int hard);
 
 /* Neither of these functions NUL-terminate the buffer */
 size_t vterm_screen_get_chars(const VTermScreen *screen, uint32_t *chars, size_t len, const VTermRect rect);
@@ -617,7 +648,7 @@ void vterm_screen_convert_color_to_rgb(const VTermScreen *screen, VTermColor *co
  * Similar to vterm_state_set_default_colors(), but also resets colours in the
  * screen buffer(s)
  */
-void vterm_screen_set_default_colors(VTermScreen *screen, const VTermColor *default_fg, const VTermColor *default_bg);
+VTermStatus vterm_screen_set_default_colors(VTermScreen *screen, const VTermColor *default_fg, const VTermColor *default_bg);
 
 // ---------
 // Utilities
@@ -626,11 +657,11 @@ void vterm_screen_set_default_colors(VTermScreen *screen, const VTermColor *defa
 VTermValueType vterm_get_attr_type(VTermAttr attr);
 VTermValueType vterm_get_prop_type(VTermProp prop);
 
-void vterm_scroll_rect(VTermRect rect,
+VTermStatus vterm_scroll_rect(VTermRect rect,
                        int downward,
                        int rightward,
-                       int (*moverect)(VTermRect src, VTermRect dest, void *user),
-                       int (*eraserect)(VTermRect rect, int selective, void *user),
+                       VTermCallbackResult (*moverect)(VTermRect src, VTermRect dest, void *user),
+                       VTermCallbackResult (*eraserect)(VTermRect rect, int selective, void *user),
                        void *user);
 
 void vterm_copy_cells(VTermRect dest,

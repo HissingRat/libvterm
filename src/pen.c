@@ -1,7 +1,5 @@
 #include "vterm_internal.h"
 
-#include <stdio.h>
-
 /**
  * Structure used to store RGB triples without the additional metadata stored in
  * VTermColor.
@@ -103,7 +101,7 @@ static int lookup_colour(const VTermState *state, int palette, const long args[]
             return argcount ? 1 : 0;
 
         default:
-            DEBUG_LOG("Unrecognised colour palette %d\n", palette);
+            DEBUG_LOG(state->vt, "Unrecognised colour palette %d\n", palette);
             return 0;
     }
 }
@@ -113,13 +111,13 @@ static int lookup_colour(const VTermState *state, int palette, const long args[]
 static void setpenattr(VTermState *state, VTermAttr attr, VTermValueType type, VTermValue *val) {
 #ifdef DEBUG
     if (type != vterm_get_attr_type(attr)) {
-        DEBUG_LOG("Cannot set attr %d as it has type %d, not type %d\n",
+        DEBUG_LOG(state->vt, "Cannot set attr %d as it has type %d, not type %d\n",
                   attr, vterm_get_attr_type(attr), type);
         return;
     }
 #endif
     if (state->callbacks && state->callbacks->setpenattr)
-        (*state->callbacks->setpenattr)(attr, val, state->cbdata);
+        vt_callback(state->vt, (*state->callbacks->setpenattr)(attr, val, state->cbdata));
 }
 
 static void setpenattr_bool(VTermState *state, VTermAttr attr, int boolean) {
@@ -232,7 +230,7 @@ void vterm_state_get_palette_color(const VTermState *state, int index, VTermColo
     lookup_colour_palette(state, index, col);
 }
 
-void vterm_state_set_default_colors(VTermState *state, const VTermColor *default_fg, const VTermColor *default_bg) {
+static void vterm_state_set_default_colors_impl(VTermState *state, const VTermColor *default_fg, const VTermColor *default_bg) {
     if (default_fg) {
         state->default_fg = *default_fg;
         state->default_fg.type = (state->default_fg.type & ~VTERM_COLOR_DEFAULT_MASK)
@@ -246,9 +244,24 @@ void vterm_state_set_default_colors(VTermState *state, const VTermColor *default
     }
 }
 
-void vterm_state_set_palette_color(VTermState *state, int index, const VTermColor *col) {
+VTermStatus vterm_state_set_default_colors(VTermState *state, const VTermColor *default_fg, const VTermColor *default_bg) {
+    if (!state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(state->vt);
+    vterm_state_set_default_colors_impl(state, default_fg, default_bg);
+    return vt_end(state->vt);
+}
+
+static void vterm_state_set_palette_color_impl(VTermState *state, int index, const VTermColor *col) {
     if (index >= 0 && index < 16)
         state->colors[index] = *col;
+}
+
+VTermStatus vterm_state_set_palette_color(VTermState *state, int index, const VTermColor *col) {
+    if (!col || index < 0 || index >= 16) return VTERM_ERR_INVALID_ARGUMENT;
+    if (!state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(state->vt);
+    vterm_state_set_palette_color_impl(state, index, col);
+    return vt_end(state->vt);
 }
 
 void vterm_state_convert_color_to_rgb(const VTermState *state, VTermColor *col) {
@@ -259,8 +272,15 @@ void vterm_state_convert_color_to_rgb(const VTermState *state, VTermColor *col) 
     col->type &= VTERM_COLOR_TYPE_MASK; /* Reset any metadata but the type */
 }
 
-void vterm_state_set_bold_highbright(VTermState *state, int bold_is_highbright) {
+static void vterm_state_set_bold_highbright_impl(VTermState *state, int bold_is_highbright) {
     state->bold_is_highbright = bold_is_highbright;
+}
+
+VTermStatus vterm_state_set_bold_highbright(VTermState *state, int bold_is_highbright) {
+    if (!state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(state->vt);
+    vterm_state_set_bold_highbright_impl(state, bold_is_highbright);
+    return vt_end(state->vt);
 }
 
 INTERNAL void vterm_state_setpen(VTermState *state, const long args[], int argcount) {
@@ -485,7 +505,7 @@ INTERNAL void vterm_state_setpen(VTermState *state, const long args[], int argco
         }
 
         if (!done)
-            DEBUG_LOG("libvterm: Unhandled CSI SGR %ld\n", arg);
+            DEBUG_LOG(state->vt, "libvterm: Unhandled CSI SGR %ld\n", arg);
 
         while (CSI_ARG_HAS_MORE(args[argi++]));
     }

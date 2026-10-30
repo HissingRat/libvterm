@@ -12,6 +12,10 @@ t/harness
 t/harness-native
 t/utils
 t/output
+t/errors
+t/freestanding
+.freestanding/
+libvterm.a
 __distdir/
 libvterm-*/
 libvterm-*.tar.gz

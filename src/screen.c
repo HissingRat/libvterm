@@ -1,14 +1,10 @@
 #include "vterm_internal.h"
 
-#include <stdio.h>
-
 #include "rect.h"
 #include "utf8.h"
 
 #define UNICODE_SPACE 0x20
 #define UNICODE_LINEFEED 0x0a
-
-#undef DEBUG_REFLOW
 
 /* State of the pen at some moment in time, also used in a cell */
 typedef struct {
@@ -84,8 +80,9 @@ static inline ScreenCell *getcell(const VTermScreen *screen, int row, int col) {
 }
 
 static ScreenCell *alloc_buffer(VTermScreen *screen, int rows, int cols) {
-    ScreenCell *new_buffer = vterm_allocator_malloc(screen->vt, sizeof(ScreenCell) * rows * cols);
+    ScreenCell *new_buffer = vt_alloc_array(screen->vt, (size_t)rows * (size_t)cols, sizeof(ScreenCell));
 
+    if (!new_buffer) return NULL;
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             clearcell(screen, &new_buffer[row * cols + col]);
@@ -140,12 +137,18 @@ static void damagerect(VTermScreen *screen, VTermRect rect) {
             return;
 
         default:
-            DEBUG_LOG("TODO: Maybe merge damage for level %d\n", screen->damage_merge);
+            DEBUG_LOG(screen->vt, "TODO: Maybe merge damage for level %d\n", screen->damage_merge);
             return;
     }
 
-    if (screen->callbacks && screen->callbacks->damage)
-        (*screen->callbacks->damage)(emit, screen->cbdata);
+    if (screen->callbacks && screen->callbacks->damage) {
+        VTermCallbackResult result = screen->callbacks->damage(emit, screen->cbdata);
+        vt_callback(screen->vt, result);
+        if (result.status != VTERM_OK) {
+            if (screen->damaged.start_row == -1) screen->damaged = emit;
+            else rect_expand(&screen->damaged, &emit);
+        }
+    }
 }
 
 static void damagescreen(VTermScreen *screen) {
@@ -159,12 +162,12 @@ static void damagescreen(VTermScreen *screen) {
     damagerect(screen, rect);
 }
 
-static int putglyph(VTermGlyphInfo *info, VTermPos pos, void *user) {
+static VTermCallbackResult putglyph(VTermGlyphInfo *info, VTermPos pos, void *user) {
     VTermScreen *screen = user;
     ScreenCell *cell = getcell(screen, pos.row, pos.col);
 
     if (!cell)
-        return 0;
+        return vt_result(screen->vt, 0);
 
     int i;
     for (i = 0; i < VTERM_MAX_CHARS_PER_CELL && info->chars[i]; i++) {
@@ -190,7 +193,7 @@ static int putglyph(VTermGlyphInfo *info, VTermPos pos, void *user) {
 
     damagerect(screen, rect);
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
 static void sb_pushline_from_row(VTermScreen *screen, int row, bool continuation) {
@@ -199,12 +202,12 @@ static void sb_pushline_from_row(VTermScreen *screen, int row, bool continuation
         vterm_screen_get_cell(screen, pos, screen->sb_buffer + pos.col);
 
     if (screen->callbacks_has_pushline4 && screen->callbacks->sb_pushline4)
-        (screen->callbacks->sb_pushline4)(screen->cols, screen->sb_buffer, continuation, screen->cbdata);
+        vt_callback(screen->vt, (screen->callbacks->sb_pushline4)(screen->cols, screen->sb_buffer, continuation, screen->cbdata));
     else
-        (screen->callbacks->sb_pushline)(screen->cols, screen->sb_buffer, screen->cbdata);
+        vt_callback(screen->vt, (screen->callbacks->sb_pushline)(screen->cols, screen->sb_buffer, screen->cbdata));
 }
 
-static int premove(VTermRect rect, void *user) {
+static VTermCallbackResult premove(VTermRect rect, void *user) {
     VTermScreen *screen = user;
 
     if (((screen->callbacks && screen->callbacks->sb_pushline) ||
@@ -219,10 +222,10 @@ static int premove(VTermRect rect, void *user) {
         }
     }
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
-static int moverect_internal(VTermRect dest, VTermRect src, void *user) {
+static VTermCallbackResult moverect_internal(VTermRect dest, VTermRect src, void *user) {
     VTermScreen *screen = user;
 
     int cols = src.end_col - src.start_col;
@@ -244,10 +247,10 @@ static int moverect_internal(VTermRect dest, VTermRect src, void *user) {
                 getcell(screen, row + downward, src.start_col),
                 cols * sizeof(ScreenCell));
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
-static int moverect_user(VTermRect dest, VTermRect src, void *user) {
+static VTermCallbackResult moverect_user(VTermRect dest, VTermRect src, void *user) {
     VTermScreen *screen = user;
 
     if (screen->callbacks && screen->callbacks->moverect) {
@@ -255,16 +258,22 @@ static int moverect_user(VTermRect dest, VTermRect src, void *user) {
             // Avoid an infinite loop
             vterm_screen_flush_damage(screen);
 
-        if ((*screen->callbacks->moverect)(dest, src, screen->cbdata))
-            return 1;
+        VTermCallbackResult result = screen->callbacks->moverect(dest, src, screen->cbdata);
+        vt_callback(screen->vt, result);
+        if (result.status != VTERM_OK) {
+            if (screen->damaged.start_row == -1) screen->damaged = dest;
+            else rect_expand(&screen->damaged, &dest);
+            return vt_result(screen->vt, 1);
+        }
+        if (result.handled) return vt_result(screen->vt, 1);
     }
 
     damagerect(screen, dest);
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
-static int erase_internal(VTermRect rect, int selective, void *user) {
+static VTermCallbackResult erase_internal(VTermRect rect, int selective, void *user) {
     VTermScreen *screen = user;
 
     for (int row = rect.start_row; row < screen->state->rows && row < rect.end_row; row++) {
@@ -287,35 +296,35 @@ static int erase_internal(VTermRect rect, int selective, void *user) {
         }
     }
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
-static int erase_user(VTermRect rect, int selective, void *user) {
+static VTermCallbackResult erase_user(VTermRect rect, int selective, void *user) {
     VTermScreen *screen = user;
 
     damagerect(screen, rect);
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
-static int erase(VTermRect rect, int selective, void *user) {
+static VTermCallbackResult erase(VTermRect rect, int selective, void *user) {
     erase_internal(rect, selective, user);
     return erase_user(rect, 0, user);
 }
 
-static int scrollrect(VTermRect rect, int downward, int rightward, void *user) {
+static VTermCallbackResult scrollrect(VTermRect rect, int downward, int rightward, void *user) {
     VTermScreen *screen = user;
 
     if (screen->damage_merge != VTERM_DAMAGE_SCROLL) {
-        vterm_scroll_rect(rect, downward, rightward,
-                          moverect_internal, erase_internal, screen);
+        vt_error(screen->vt, vterm_scroll_rect(rect, downward, rightward,
+                          moverect_internal, erase_internal, screen));
 
         vterm_screen_flush_damage(screen);
 
-        vterm_scroll_rect(rect, downward, rightward,
-                          moverect_user, erase_user, screen);
+        vt_error(screen->vt, vterm_scroll_rect(rect, downward, rightward,
+                          moverect_user, erase_user, screen));
 
-        return 1;
+        return vt_result(screen->vt, 1);
     }
 
     if (screen->damaged.start_row != -1 &&
@@ -340,11 +349,11 @@ static int scrollrect(VTermRect rect, int downward, int rightward, void *user) {
         screen->pending_scroll_rightward = rightward;
     }
 
-    vterm_scroll_rect(rect, downward, rightward,
-                      moverect_internal, erase_internal, screen);
+    vt_error(screen->vt, vterm_scroll_rect(rect, downward, rightward,
+                      moverect_internal, erase_internal, screen));
 
     if (screen->damaged.start_row == -1)
-        return 1;
+        return vt_result(screen->vt, 1);
 
     if (rect_contains(&rect, &screen->damaged)) {
         /* Scroll region entirely contains the damage; just move it */
@@ -376,77 +385,79 @@ static int scrollrect(VTermRect rect, int downward, int rightward, void *user) {
                 screen->damaged.end_row = rect.end_row;
         }
     } else {
-        DEBUG_LOG("TODO: Just flush and redo damaged=" STRFrect " rect=" STRFrect "\n",
+        DEBUG_LOG(screen->vt, "TODO: Just flush and redo damaged=" STRFrect " rect=" STRFrect "\n",
                   ARGSrect(screen->damaged), ARGSrect(rect));
     }
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
-static int movecursor(VTermPos pos, VTermPos oldpos, int visible, void *user) {
+static VTermCallbackResult movecursor(VTermPos pos, VTermPos oldpos, int visible, void *user) {
     VTermScreen *screen = user;
 
     if (screen->callbacks && screen->callbacks->movecursor)
-        return (*screen->callbacks->movecursor)(pos, oldpos, visible, screen->cbdata);
+        return vt_result(screen->vt, vt_callback(screen->vt, (*screen->callbacks->movecursor)(pos, oldpos, visible, screen->cbdata)));
 
-    return 0;
+    return vt_result(screen->vt, 0);
 }
 
-static int setpenattr(VTermAttr attr, VTermValue *val, void *user) {
+static VTermCallbackResult setpenattr(VTermAttr attr, VTermValue *val, void *user) {
     VTermScreen *screen = user;
 
     switch (attr) {
         case VTERM_ATTR_BOLD:
             screen->pen.bold = val->boolean;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_UNDERLINE:
             screen->pen.underline = val->number;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_ITALIC:
             screen->pen.italic = val->boolean;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_BLINK:
             screen->pen.blink = val->boolean;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_REVERSE:
             screen->pen.reverse = val->boolean;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_CONCEAL:
             screen->pen.conceal = val->boolean;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_STRIKE:
             screen->pen.strike = val->boolean;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_FONT:
             screen->pen.font = val->number;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_FOREGROUND:
             screen->pen.fg = val->color;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_BACKGROUND:
             screen->pen.bg = val->color;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_SMALL:
             screen->pen.small = val->boolean;
-            return 1;
+            return vt_result(screen->vt, 1);
         case VTERM_ATTR_BASELINE:
             screen->pen.baseline = val->number;
-            return 1;
+            return vt_result(screen->vt, 1);
 
         case VTERM_N_ATTRS:
-            return 0;
+            return vt_result(screen->vt, 0);
     }
 
-    return 0;
+    return vt_result(screen->vt, 0);
 }
 
-static int settermprop(VTermProp prop, VTermValue *val, void *user) {
+static VTermCallbackResult settermprop(VTermProp prop, VTermValue *val, void *user) {
     VTermScreen *screen = user;
+    ScreenCell *old_buffer = screen->buffer;
+    unsigned int old_reverse = screen->global_reverse;
 
     switch (prop) {
         case VTERM_PROP_ALTSCREEN:
             if (val->boolean && !screen->buffers[BUFIDX_ALTSCREEN])
-                return 0;
+                return vt_result(screen->vt, 0);
 
             screen->buffer = val->boolean ? screen->buffers[BUFIDX_ALTSCREEN] : screen->buffers[BUFIDX_PRIMARY];
             /* only send a damage event on disable; because during enable there's an
@@ -463,19 +474,28 @@ static int settermprop(VTermProp prop, VTermValue *val, void *user) {
             ; /* ignore */
     }
 
-    if (screen->callbacks && screen->callbacks->settermprop)
-        return (*screen->callbacks->settermprop)(prop, val, screen->cbdata);
-
-    return 1;
+    if (screen->callbacks && screen->callbacks->settermprop) {
+        VTermCallbackResult result = screen->callbacks->settermprop(prop, val, screen->cbdata);
+        vt_error(screen->vt, result.status);
+        if (result.status != VTERM_OK || !result.handled) {
+            screen->buffer = old_buffer;
+            screen->global_reverse = old_reverse;
+            if (prop == VTERM_PROP_ALTSCREEN || prop == VTERM_PROP_REVERSE)
+                screen->damaged = (VTermRect){0, screen->rows, 0, screen->cols};
+            return (VTermCallbackResult){result.status, false};
+        }
+    }
+    screen->vt->property_committed = true;
+    return vt_result(screen->vt, 1);
 }
 
-static int bell(void *user) {
+static VTermCallbackResult bell(void *user) {
     VTermScreen *screen = user;
 
     if (screen->callbacks && screen->callbacks->bell)
-        return (*screen->callbacks->bell)(screen->cbdata);
+        return vt_result(screen->vt, vt_callback(screen->vt, (*screen->callbacks->bell)(screen->cbdata)));
 
-    return 0;
+    return vt_result(screen->vt, 0);
 }
 
 /* How many cells are non-blank
@@ -488,15 +508,12 @@ static int line_popcount(ScreenCell *buffer, int row, int rows, int cols) {
 }
 
 static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new_cols, bool active,
-                          VTermStateFields *statefields) {
+                          VTermStateFields *statefields, ScreenCell *new_buffer, VTermLineInfo *new_lineinfo) {
     int old_rows = screen->rows;
     int old_cols = screen->cols;
 
     ScreenCell *old_buffer = screen->buffers[bufidx];
     VTermLineInfo *old_lineinfo = statefields->lineinfos[bufidx];
-
-    ScreenCell *new_buffer = vterm_allocator_malloc(screen->vt, sizeof(ScreenCell) * new_rows * new_cols);
-    VTermLineInfo *new_lineinfo = vterm_allocator_malloc(screen->vt, sizeof(new_lineinfo[0]) * new_rows);
 
     int old_row = old_rows - 1;
     int new_row = new_rows - 1;
@@ -505,7 +522,7 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
     VTermPos new_cursor = {-1, -1};
 
 #ifdef DEBUG_REFLOW
-    fprintf(stderr, "Resizing from %dx%d to %dx%d; cursor was at (%d,%d)\n",
+    vt_log(screen->vt, VTERM_LOG_DEBUG, "Resizing from %dx%d to %dx%d; cursor was at (%d,%d)\n",
             old_cols, old_rows, new_cols, new_rows, old_cursor.col, old_cursor.row);
 #endif
 
@@ -558,7 +575,7 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
             int rowcount = new_rows - downwards;
 
 #ifdef DEBUG_REFLOW
-            fprintf(stderr, "  scroll %d rows +%d downwards\n", rowcount, downwards);
+            vt_log(screen->vt, VTERM_LOG_DEBUG, "  scroll %d rows +%d downwards\n", rowcount, downwards);
 #endif
 
             vt_memmove(&new_buffer[downwards * new_cols], &new_buffer[0], rowcount * new_cols * sizeof(ScreenCell));
@@ -575,7 +592,7 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
         }
 
 #ifdef DEBUG_REFLOW
-        fprintf(stderr, "  rows [%d..%d] <- [%d..%d] width=%d\n",
+        vt_log(screen->vt, VTERM_LOG_DEBUG, "  rows [%d..%d] <- [%d..%d] width=%d\n",
                 new_row_start, new_row_end, old_row_start, old_row_end, width);
 #endif
 
@@ -645,8 +662,7 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
 
     /* We really expect the cursor position to be set by now */
     if (active && (new_cursor.row == -1 || new_cursor.col == -1)) {
-        fprintf(stderr, "screen_resize failed to update cursor position\n");
-        abort();
+        vt_fatal(screen->vt, "screen_resize failed to update cursor position\n");
     }
 
     if (old_row >= 0 && bufidx == BUFIDX_PRIMARY) {
@@ -664,12 +680,15 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
         screen->callbacks && screen->callbacks->sb_popline) {
         /* Try to backfill rows by popping scrollback buffer */
         while (new_row >= 0) {
-            if (!(screen->callbacks->sb_popline(old_cols, screen->sb_buffer, screen->cbdata)))
-                break;
+            VTermCallbackResult popped = screen->callbacks->sb_popline(old_cols, screen->sb_buffer, screen->cbdata);
+            vt_error(screen->vt, popped.status);
+            if (popped.status != VTERM_OK || !popped.handled) break;
 
             VTermPos pos = {.row = new_row};
             for (pos.col = 0; pos.col < old_cols && pos.col < new_cols; pos.col += screen->sb_buffer[pos.col].width) {
                 VTermScreenCell *src = &screen->sb_buffer[pos.col];
+                if (src->width < 1 || src->width > 2)
+                    vt_fatal(screen->vt, "Invalid scrollback cell width %d", src->width);
                 ScreenCell *dst = &new_buffer[pos.row * new_cols + pos.col];
 
                 for (int i = 0; i < VTERM_MAX_CHARS_PER_CELL; i++) {
@@ -733,62 +752,51 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
     return;
 }
 
-static int resize(int new_rows, int new_cols, VTermStateFields *fields, void *user) {
+static VTermCallbackResult resize(int rows, int cols, VTermStateFields *fields, void *user) {
     VTermScreen *screen = user;
-
-    int altscreen_active = (screen->buffers[BUFIDX_ALTSCREEN] && screen->buffer == screen->buffers[BUFIDX_ALTSCREEN]);
-
-    int old_rows = screen->rows;
-    int old_cols = screen->cols;
-
-    if (new_cols > old_cols) {
-        /* Ensure that ->sb_buffer is large enough for a new or and old row */
-        if (screen->sb_buffer)
-            vterm_allocator_free(screen->vt, screen->sb_buffer);
-
-        screen->sb_buffer = vterm_allocator_malloc(screen->vt, sizeof(VTermScreenCell) * new_cols);
+    VTerm *vt = screen->vt;
+    ScreenCell *buffers[2] = {NULL, NULL};
+    VTermLineInfo *lines[2] = {NULL, NULL};
+    int capacity = cols > screen->cols ? cols : screen->cols;
+    VTermScreenCell *sb = vt_alloc_array(vt, (size_t)capacity, sizeof(*sb));
+    for (int i = 0; i < 2; i++) {
+        if (screen->buffers[i])
+            buffers[i] = vt_alloc_array(vt, (size_t)rows * (size_t)cols, sizeof(*buffers[i]));
+        lines[i] = vt_alloc_array(vt, (size_t)rows, sizeof(*lines[i]));
     }
-
-    resize_buffer(screen, 0, new_rows, new_cols, !altscreen_active, fields);
-    if (screen->buffers[BUFIDX_ALTSCREEN])
-        resize_buffer(screen, 1, new_rows, new_cols, altscreen_active, fields);
-    else if (new_rows != old_rows) {
-        /* We don't need a full resize of the altscreen because it isn't enabled
-         * but we should at least keep the lineinfo the right size */
-        vterm_allocator_free(screen->vt, fields->lineinfos[BUFIDX_ALTSCREEN]);
-
-        VTermLineInfo *new_lineinfo = vterm_allocator_malloc(screen->vt, sizeof(new_lineinfo[0]) * new_rows);
-        for (int row = 0; row < new_rows; row++)
-            new_lineinfo[row] = (VTermLineInfo)
-        {
-            0
-        };
-
-        fields->lineinfos[BUFIDX_ALTSCREEN] = new_lineinfo;
+    if (!sb || !buffers[0] || (screen->buffers[1] && !buffers[1]) || !lines[0] || !lines[1]) {
+        for (int i = 0; i < 2; i++) {
+            vterm_allocator_free(vt, buffers[i]);
+            vterm_allocator_free(vt, lines[i]);
+        }
+        vterm_allocator_free(vt, sb);
+        return vt_result(vt, 0);
     }
-
-    screen->buffer = altscreen_active ? screen->buffers[BUFIDX_ALTSCREEN] : screen->buffers[BUFIDX_PRIMARY];
-
-    screen->rows = new_rows;
-    screen->cols = new_cols;
-
-    if (new_cols <= old_cols) {
-        if (screen->sb_buffer)
-            vterm_allocator_free(screen->vt, screen->sb_buffer);
-
-        screen->sb_buffer = vterm_allocator_malloc(screen->vt, sizeof(VTermScreenCell) * new_cols);
+    bool alt = screen->buffers[1] && screen->buffer == screen->buffers[1];
+    VTermScreenCell *old_sb = screen->sb_buffer;
+    screen->sb_buffer = sb;
+    resize_buffer(screen, 0, rows, cols, !alt, fields, buffers[0], lines[0]);
+    if (screen->buffers[1])
+        resize_buffer(screen, 1, rows, cols, alt, fields, buffers[1], lines[1]);
+    else {
+        vterm_allocator_free(vt, fields->lineinfos[1]);
+        fields->lineinfos[1] = lines[1];
     }
-
-    /* TODO: Maaaaybe we can optimise this if there's no reflow happening */
-    damagescreen(screen);
-
-    if (screen->callbacks && screen->callbacks->resize)
-        return (*screen->callbacks->resize)(new_rows, new_cols, screen->cbdata);
-
-    return 1;
+    screen->buffer = screen->buffers[alt ? 1 : 0];
+    screen->rows = rows;
+    screen->cols = cols;
+    vterm_allocator_free(vt, old_sb);
+    vt->resize_committed = true;
+    return vt_result(vt, 1);
 }
 
-static int setlineinfo(int row, const VTermLineInfo *newinfo, const VTermLineInfo *oldinfo, void *user) {
+void vt_screen_resize_notify(VTermScreen *screen) {
+    damagescreen(screen);
+    if (screen->callbacks && screen->callbacks->resize)
+        vt_callback(screen->vt, screen->callbacks->resize(screen->rows, screen->cols, screen->cbdata));
+}
+
+static VTermCallbackResult setlineinfo(int row, const VTermLineInfo *newinfo, const VTermLineInfo *oldinfo, void *user) {
     VTermScreen *screen = user;
 
     if (newinfo->doublewidth != oldinfo->doublewidth ||
@@ -815,17 +823,17 @@ static int setlineinfo(int row, const VTermLineInfo *newinfo, const VTermLineInf
         }
     }
 
-    return 1;
+    return vt_result(screen->vt, 1);
 }
 
-static int sb_clear(void *user) {
+static VTermCallbackResult sb_clear(void *user) {
     VTermScreen *screen = user;
 
     if (screen->callbacks && screen->callbacks->sb_clear)
-        if ((*screen->callbacks->sb_clear)(screen->cbdata))
-            return 1;
+        if (vt_callback(screen->vt, (*screen->callbacks->sb_clear)(screen->cbdata)))
+            return vt_result(screen->vt, 1);
 
-    return 0;
+    return vt_result(screen->vt, 0);
 }
 
 static VTermStateCallbacks state_cbs = {
@@ -843,11 +851,21 @@ static VTermStateCallbacks state_cbs = {
 };
 
 static VTermScreen *screen_new(VTerm *vt) {
-    VTermState *state = vterm_obtain_state(vt);
-    if (!state)
+    const VTermParserCallbacks *old_parser = vt->parser.callbacks;
+    void *old_parser_data = vt->parser.cbdata;
+    VTermState *state = NULL;
+    bool created_state = !vt->state;
+    if (vterm_obtain_state(vt, &state) != VTERM_OK)
         return NULL;
 
     VTermScreen *screen = vterm_allocator_malloc(vt, sizeof(VTermScreen));
+    if (!screen) {
+        if (created_state) {
+            vterm_state_free(state); vt->state = NULL;
+            vterm_parser_set_callbacks(vt, old_parser, old_parser_data);
+        }
+        return NULL;
+    }
     int rows, cols;
 
     vterm_get_size(vt, &rows, &cols);
@@ -875,6 +893,14 @@ static VTermScreen *screen_new(VTerm *vt) {
 
     screen->sb_buffer = vterm_allocator_malloc(screen->vt, sizeof(VTermScreenCell) * cols);
 
+    if (!screen->buffers[0] || !screen->sb_buffer) {
+        vterm_screen_free(screen);
+        if (created_state) {
+            vterm_state_free(state); vt->state = NULL;
+            vterm_parser_set_callbacks(vt, old_parser, old_parser_data);
+        }
+        return NULL;
+    }
     vterm_state_set_callbacks(screen->state, &state_cbs, screen);
     vterm_state_callbacks_has_premove(screen->state);
 
@@ -891,11 +917,18 @@ INTERNAL void vterm_screen_free(VTermScreen *screen) {
     vterm_allocator_free(screen->vt, screen);
 }
 
-void vterm_screen_reset(VTermScreen *screen, int hard) {
+static void vterm_screen_reset_impl(VTermScreen *screen, int hard) {
     screen->damaged.start_row = -1;
     screen->pending_scrollrect.start_row = -1;
     vterm_state_reset(screen->state, hard);
     vterm_screen_flush_damage(screen);
+}
+
+VTermStatus vterm_screen_reset(VTermScreen *screen, int hard) {
+    if (!screen) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(screen->vt);
+    vterm_screen_reset_impl(screen, hard);
+    return vt_end(screen->vt);
 }
 
 static size_t _get_chars(const VTermScreen *screen, const int utf8, void *buffer, size_t len, const VTermRect rect) {
@@ -1004,14 +1037,13 @@ int vterm_screen_is_eol(const VTermScreen *screen, VTermPos pos) {
     return 1;
 }
 
-VTermScreen *vterm_obtain_screen(VTerm *vt) {
-    if (vt->screen)
-        return vt->screen;
-
-    VTermScreen *screen = screen_new(vt);
-    vt->screen = screen;
-
-    return screen;
+VTermStatus vterm_obtain_screen(VTerm *vt, VTermScreen **out_screen) {
+    if (!out_screen) return VTERM_ERR_INVALID_ARGUMENT;
+    *out_screen = NULL;
+    if (vt_begin(vt) != VTERM_OK) return VTERM_ERR_INVALID_ARGUMENT;
+    if (!vt->screen) vt->screen = screen_new(vt);
+    *out_screen = vt->screen;
+    return vt_end(vt);
 }
 
 void vterm_screen_enable_reflow(VTermScreen *screen, bool reflow) {
@@ -1023,13 +1055,20 @@ void vterm_screen_set_reflow(VTermScreen *screen, bool reflow) {
     vterm_screen_enable_reflow(screen, reflow);
 }
 
-void vterm_screen_enable_altscreen(VTermScreen *screen, int altscreen) {
+static void vterm_screen_enable_altscreen_impl(VTermScreen *screen, int altscreen) {
     if (!screen->buffers[BUFIDX_ALTSCREEN] && altscreen) {
         int rows, cols;
         vterm_get_size(screen->vt, &rows, &cols);
 
         screen->buffers[BUFIDX_ALTSCREEN] = alloc_buffer(screen, rows, cols);
     }
+}
+
+VTermStatus vterm_screen_enable_altscreen(VTermScreen *screen, int altscreen) {
+    if (!screen) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(screen->vt);
+    vterm_screen_enable_altscreen_impl(screen, altscreen);
+    return vt_end(screen->vt);
 }
 
 void vterm_screen_set_callbacks(VTermScreen *screen, const VTermScreenCallbacks *callbacks, void *user) {
@@ -1053,25 +1092,41 @@ void *vterm_screen_get_unrecognised_fbdata(VTermScreen *screen) {
     return vterm_state_get_unrecognised_fbdata(screen->state);
 }
 
-void vterm_screen_flush_damage(VTermScreen *screen) {
+static void vterm_screen_flush_damage_impl(VTermScreen *screen) {
     if (screen->pending_scrollrect.start_row != -1) {
-        vterm_scroll_rect(screen->pending_scrollrect, screen->pending_scroll_downward, screen->pending_scroll_rightward,
-                          moverect_user, erase_user, screen);
+        vt_error(screen->vt, vterm_scroll_rect(screen->pending_scrollrect, screen->pending_scroll_downward, screen->pending_scroll_rightward,
+                          moverect_user, erase_user, screen));
 
         screen->pending_scrollrect.start_row = -1;
     }
 
     if (screen->damaged.start_row != -1) {
         if (screen->callbacks && screen->callbacks->damage)
-            (*screen->callbacks->damage)(screen->damaged, screen->cbdata);
+            vt_callback(screen->vt, (*screen->callbacks->damage)(screen->damaged, screen->cbdata));
 
-        screen->damaged.start_row = -1;
+        if (screen->vt->error == VTERM_OK)
+            screen->damaged.start_row = -1;
     }
 }
 
-void vterm_screen_set_damage_merge(VTermScreen *screen, VTermDamageSize size) {
+VTermStatus vterm_screen_flush_damage(VTermScreen *screen) {
+    if (!screen) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(screen->vt);
+    vterm_screen_flush_damage_impl(screen);
+    return vt_end(screen->vt);
+}
+
+static void vterm_screen_set_damage_merge_impl(VTermScreen *screen, VTermDamageSize size) {
     vterm_screen_flush_damage(screen);
     screen->damage_merge = size;
+}
+
+VTermStatus vterm_screen_set_damage_merge(VTermScreen *screen, VTermDamageSize size) {
+    if (size < VTERM_DAMAGE_CELL || size >= VTERM_N_DAMAGES) return VTERM_ERR_INVALID_ARGUMENT;
+    if (!screen) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(screen->vt);
+    vterm_screen_set_damage_merge_impl(screen, size);
+    return vt_end(screen->vt);
 }
 
 static int attrs_differ(VTermAttrMask attrs, ScreenCell *a, ScreenCell *b) {
@@ -1145,7 +1200,7 @@ static void reset_default_colours(VTermScreen *screen, ScreenCell *buffer) {
         }
 }
 
-void vterm_screen_set_default_colors(VTermScreen *screen, const VTermColor *default_fg, const VTermColor *default_bg) {
+static void vterm_screen_set_default_colors_impl(VTermScreen *screen, const VTermColor *default_fg, const VTermColor *default_bg) {
     vterm_state_set_default_colors(screen->state, default_fg, default_bg);
 
     if (default_fg && VTERM_COLOR_IS_DEFAULT_FG(&screen->pen.fg)) {
@@ -1163,4 +1218,11 @@ void vterm_screen_set_default_colors(VTermScreen *screen, const VTermColor *defa
     reset_default_colours(screen, screen->buffers[0]);
     if (screen->buffers[1])
         reset_default_colours(screen, screen->buffers[1]);
+}
+
+VTermStatus vterm_screen_set_default_colors(VTermScreen *screen, const VTermColor *default_fg, const VTermColor *default_bg) {
+    if (!screen) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(screen->vt);
+    vterm_screen_set_default_colors_impl(screen, default_fg, default_bg);
+    return vt_end(screen->vt);
 }

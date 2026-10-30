@@ -1,3 +1,4 @@
+#include "../support/host.h"
 #include "vterm.h"
 
 #include <stdio.h>
@@ -16,11 +17,12 @@ static unsigned int checks;
     } \
 } while (0)
 
-static void output(const char *bytes, size_t len, void *user) {
+static VTermStatus output(const char *bytes, size_t len, void *user) {
     (void)user;
     CHECK(len <= sizeof(received) - received_len);
     memcpy(received + received_len, bytes, len);
     received_len += len;
+    return VTERM_OK;
 }
 
 static void expect(VTerm *vt, int callback, size_t capacity, const char *bytes, size_t len) {
@@ -76,11 +78,11 @@ static void test_selection_ownership(void) {
     const VTermAllocatorFunctions allocator = { .malloc = allocate, .free = release };
     for (int borrowed_at_exit = 0; borrowed_at_exit <= 1; borrowed_at_exit++) {
         Allocations allocations = {0};
-        VTerm *vt = vterm_build(&(struct VTermBuilder){
+        VTerm *vt = host_build((struct VTermBuilder){
             .rows = 2, .cols = 8, .allocator = &allocator, .allocdata = &allocations,
         });
         CHECK(vt != NULL);
-        VTermState *state = vterm_obtain_state(vt);
+        VTermState *state = host_state(vt);
         CHECK(state != NULL);
         size_t base = allocations.live;
         vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 16);
@@ -91,7 +93,7 @@ static void test_selection_ownership(void) {
         vterm_state_set_selection_callbacks(state, NULL, NULL, allocations.last, 32);
         CHECK(allocations.live == base + 1);
         allocations.fail = 1;
-        vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 64);
+        CHECK(vterm_state_set_selection_callbacks(state, NULL, NULL, NULL, 64) == VTERM_ERR_NO_MEMORY);
         CHECK(allocations.live == base + 1);
         allocations.fail = 0;
         char borrowed[16];
@@ -111,25 +113,28 @@ static void test_selection_ownership(void) {
 int main(void) {
     for (int callback = 0; callback <= 1; callback++) {
         for (size_t capacity = 1; capacity <= 32; capacity++) {
-            VTerm *vt = vterm_build(&(struct VTermBuilder){
+            VTerm *vt = host_build((struct VTermBuilder){
                 .rows = 2, .cols = 8, .tmpbuffer_len = capacity,
             });
             CHECK(vt != NULL);
-            VTermState *state = vterm_obtain_state(vt);
+            VTermState *state = host_state(vt);
             CHECK(state != NULL);
-            vterm_state_reset(state, 1);
+            CHECK(vterm_state_reset(state, 1) == VTERM_OK);
             if (callback)
                 vterm_output_set_callback(vt, output, NULL);
 
-            vterm_keyboard_unichar(vt, 'a', VTERM_MOD_ALT);
+            CHECK(vterm_keyboard_unichar(vt, 'a', VTERM_MOD_ALT) == (capacity > 2 ? VTERM_OK : VTERM_ERR_NO_SPACE));
             expect(vt, callback, capacity, "\x1b" "a", 2);
-            vterm_keyboard_unichar(vt, ' ', VTERM_MOD_CTRL);
+            CHECK(vterm_keyboard_unichar(vt, ' ', VTERM_MOD_CTRL) == (capacity > 1 ? VTERM_OK : VTERM_ERR_NO_SPACE));
             expect(vt, callback, capacity, "\0", 1);
-            vterm_keyboard_unichar(vt, ' ', VTERM_MOD_CTRL | VTERM_MOD_ALT);
+            CHECK(vterm_keyboard_unichar(vt, ' ', VTERM_MOD_CTRL | VTERM_MOD_ALT) == (capacity > 2 ? VTERM_OK : VTERM_ERR_NO_SPACE));
             expect(vt, callback, capacity, "\x1b\0", 2);
-            vterm_keyboard_key(vt, VTERM_KEY_UP, VTERM_MOD_ALT);
+            CHECK(vterm_keyboard_key(vt, VTERM_KEY_UP, VTERM_MOD_ALT) == (capacity > 6 ? VTERM_OK : VTERM_ERR_NO_SPACE));
             expect(vt, callback, capacity, "\x1b[1;3A", 6);
-            CHECK(vterm_input_write(vt, "\x1b[6n", 4) == 4);
+            size_t consumed;
+            CHECK(vterm_input_write(vt, "\x1b[6n", 4, &consumed) ==
+                  (capacity > 6 ? VTERM_OK : VTERM_ERR_NO_SPACE));
+            CHECK(consumed == 4);
             expect(vt, callback, capacity, "\x1b[1;1R", 6);
             vterm_free(vt);
         }

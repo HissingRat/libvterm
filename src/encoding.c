@@ -24,20 +24,20 @@ static void init_utf8(VTermEncoding *enc, void *data_) {
     data->bytes_total = 0;
 }
 
-static void decode_utf8(VTermEncoding *enc, void *data_,
+static void decode_utf8(VTerm *vt, VTermEncoding *enc, void *data_,
                         uint32_t cp[], int *cpi, int cplen,
                         const char bytes[], size_t *pos, size_t bytelen) {
     struct UTF8DecoderData *data = data_;
 
 #ifdef DEBUG_PRINT_UTF8
-    printf("BEGIN UTF-8\n");
+    vt_log(vt, VTERM_LOG_DEBUG, "BEGIN UTF-8\n");
 #endif
 
     for (; *pos < bytelen && *cpi < cplen; (*pos)++) {
         unsigned char c = bytes[*pos];
 
 #ifdef DEBUG_PRINT_UTF8
-        printf(" pos=%zd c=%02x rem=%d\n", *pos, c, data->bytes_remaining);
+        vt_log(vt, VTERM_LOG_DEBUG, " pos=%zd c=%02x rem=%d\n", *pos, c, data->bytes_remaining);
 #endif
 
         if (c < 0x20) // C0
@@ -49,7 +49,7 @@ static void decode_utf8(VTermEncoding *enc, void *data_,
 
             cp[(*cpi)++] = c;
 #ifdef DEBUG_PRINT_UTF8
-            printf(" UTF-8 char: U+%04x\n", c);
+            vt_log(vt, VTERM_LOG_DEBUG, " UTF-8 char: U+%04x\n", c);
 #endif
             data->bytes_remaining = 0;
         } else if (c == 0x7f) // DEL
@@ -67,7 +67,7 @@ static void decode_utf8(VTermEncoding *enc, void *data_,
 
             if (!data->bytes_remaining) {
 #ifdef DEBUG_PRINT_UTF8
-                printf(" UTF-8 raw char U+%04x bytelen=%d ", data->this_cp, data->bytes_total);
+                vt_log(vt, VTERM_LOG_DEBUG, " UTF-8 raw char U+%04x bytelen=%d ", data->this_cp, data->bytes_total);
 #endif
                 // Check for overlong sequences
                 switch (data->bytes_total) {
@@ -93,7 +93,7 @@ static void decode_utf8(VTermEncoding *enc, void *data_,
                     data->this_cp == 0xFFFF)
                     data->this_cp = UNICODE_INVALID;
 #ifdef DEBUG_PRINT_UTF8
-                printf(" char: U+%04x\n", data->this_cp);
+                vt_log(vt, VTERM_LOG_DEBUG, " char: U+%04x\n", data->this_cp);
 #endif
                 cp[(*cpi)++] = data->this_cp;
             }
@@ -143,7 +143,7 @@ static VTermEncoding encoding_utf8 = {
     .decode = &decode_utf8,
 };
 
-static void decode_usascii(VTermEncoding *enc, void *data,
+static void decode_usascii(VTerm *vt, VTermEncoding *enc, void *data,
                            uint32_t cp[], int *cpi, int cplen,
                            const char bytes[], size_t *pos, size_t bytelen) {
     int is_gr = bytes[*pos] & 0x80;
@@ -167,7 +167,7 @@ struct StaticTableEncoding {
     const uint32_t chars[128];
 };
 
-static void decode_table(VTermEncoding *enc, void *data,
+static void decode_table(VTerm *vt, VTermEncoding *enc, void *data,
                          uint32_t cp[], int *cpi, int cplen,
                          const char bytes[], size_t *pos, size_t bytelen) {
     struct StaticTableEncoding *table = (struct StaticTableEncoding *) enc;

@@ -38,3 +38,22 @@ jobs:
           nm -u /tmp/vterm-utils.o > /tmp/vterm-utils-undefined.txt
           cat /tmp/vterm-utils-undefined.txt
           test ! -s /tmp/vterm-utils-undefined.txt
+      - name: Build and execute the complete core without libc
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          flags="-O2 -ffreestanding -fno-stack-protector -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -msoft-float -fno-pic -fno-pie"
+          make freestanding FREESTANDING_CFLAGS="$flags"
+          for debug in "" "-DDEBUG=2 -DDEBUG_PARSER -DDEBUG_REFLOW"; do
+            "$CC" -std=c99 -Iinclude $flags $debug -nostdlib -no-pie -Wl,-e,_start src/*.c src/lib/*.c t/freestanding.c -o t/freestanding
+            nm -u t/freestanding > /tmp/vterm-core-undefined.txt
+            cat /tmp/vterm-core-undefined.txt
+            test ! -s /tmp/vterm-core-undefined.txt
+            ./t/freestanding
+          done
+      - name: Run verbose-debug error and fatal tests
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          "$CC" -std=c99 -O1 -g -Iinclude -DDEBUG=2 -DDEBUG_PARSER -DDEBUG_REFLOW src/*.c src/lib/*.c t/errors.c -o /tmp/vterm-debug-errors
+          /tmp/vterm-debug-errors

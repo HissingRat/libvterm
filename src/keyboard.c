@@ -1,10 +1,8 @@
 #include "vterm_internal.h"
 
-#include <stdio.h>
-
 #include "utf8.h"
 
-void vterm_keyboard_unichar(VTerm *vt, uint32_t c, VTermModifier mod) {
+static void vterm_keyboard_unichar_impl(VTerm *vt, uint32_t c, VTermModifier mod) {
     /* The shift modifier is never important for Unicode characters
      * apart from Space
      */
@@ -54,6 +52,16 @@ void vterm_keyboard_unichar(VTerm *vt, uint32_t c, VTermModifier mod) {
         c &= 0x1f;
 
     vterm_push_output_sprintf(vt, "%s%c", mod & VTERM_MOD_ALT ? ESC_S : "", c);
+}
+
+VTermStatus vterm_keyboard_unichar(VTerm *vt, uint32_t c, VTermModifier mod) {
+    if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff) || (mod & ~VTERM_ALL_MODS_MASK))
+        return VTERM_ERR_INVALID_ARGUMENT;
+    if (!vt || !vt->state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(vt);
+    if (vterm_output_flush(vt) != VTERM_OK) return vt_end(vt);
+    vterm_keyboard_unichar_impl(vt, c, mod);
+    return vt_end(vt);
 }
 
 typedef struct {
@@ -131,7 +139,7 @@ static keycodes_s keycodes_kp[] = {
     {KEYCODE_KEYPAD, '=', 'X'}, // KP_EQUAL
 };
 
-void vterm_keyboard_key(VTerm *vt, VTermKey key, VTermModifier mod) {
+static void vterm_keyboard_key_impl(VTerm *vt, VTermKey key, VTermModifier mod) {
     if (key == VTERM_KEY_NONE)
         return;
 
@@ -215,12 +223,37 @@ void vterm_keyboard_key(VTerm *vt, VTermKey key, VTermModifier mod) {
     }
 }
 
-void vterm_keyboard_start_paste(VTerm *vt) {
+VTermStatus vterm_keyboard_key(VTerm *vt, VTermKey key, VTermModifier mod) {
+    if (key < VTERM_KEY_NONE || (mod & ~VTERM_ALL_MODS_MASK)) return VTERM_ERR_INVALID_ARGUMENT;
+    if (!vt || !vt->state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(vt);
+    if (vterm_output_flush(vt) != VTERM_OK) return vt_end(vt);
+    vterm_keyboard_key_impl(vt, key, mod);
+    return vt_end(vt);
+}
+
+static void vterm_keyboard_start_paste_impl(VTerm *vt) {
     if (vt->state->mode.bracketpaste)
         vterm_push_output_sprintf_ctrl(vt, C1_CSI, "200~");
 }
 
-void vterm_keyboard_end_paste(VTerm *vt) {
+VTermStatus vterm_keyboard_start_paste(VTerm *vt) {
+    if (!vt || !vt->state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(vt);
+    if (vterm_output_flush(vt) != VTERM_OK) return vt_end(vt);
+    vterm_keyboard_start_paste_impl(vt);
+    return vt_end(vt);
+}
+
+static void vterm_keyboard_end_paste_impl(VTerm *vt) {
     if (vt->state->mode.bracketpaste)
         vterm_push_output_sprintf_ctrl(vt, C1_CSI, "201~");
+}
+
+VTermStatus vterm_keyboard_end_paste(VTerm *vt) {
+    if (!vt || !vt->state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(vt);
+    if (vterm_output_flush(vt) != VTERM_OK) return vt_end(vt);
+    vterm_keyboard_end_paste_impl(vt);
+    return vt_end(vt);
 }

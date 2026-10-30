@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include "../support/host.h"
 // Require getopt(3)
 #define _XOPEN_SOURCE
 
@@ -16,7 +18,7 @@
 static const char *special_begin = "{";
 static const char *special_end   = "}";
 
-static int parser_text(const char bytes[], size_t len, void *user)
+static int parser_text_impl(const char bytes[], size_t len, void *user)
 {
   unsigned char *b = (unsigned char *)bytes;
 
@@ -50,6 +52,11 @@ static int parser_text(const char bytes[], size_t len, void *user)
   printf("%.*s", i, b);
   return i;
 }
+static VTermStatus parser_text(const char *bytes, size_t len, size_t *consumed, void *user) {
+    *consumed = (size_t)parser_text_impl(bytes, len, user);
+    return VTERM_OK;
+}
+
 
 /* 0     1      2      3       4     5      6      7      8      9      A      B      C      D      E      F    */
 static const char *name_c0[] = {
@@ -61,7 +68,7 @@ static const char *name_c1[] = {
   "DCS", "PU1", "PU2", "STS", "CCH", "MW",  "SPA", "EPA", "SOS", NULL,  "SCI", "CSI", "ST",  "OSC", "PM",  "APC",
 };
 
-static int parser_control(unsigned char control, void *user)
+static VTermCallbackResult parser_control(unsigned char control, void *user)
 {
   if(control < 0x20)
     printf("%s%s%s", special_begin, name_c0[control], special_end);
@@ -74,14 +81,14 @@ static int parser_control(unsigned char control, void *user)
 
   if(control == 0x0a)
     printf("\n");
-  return 1;
+  return host_result(1);
 }
 
-static int parser_escape(const char bytes[], size_t len, void *user)
+static VTermCallbackResult parser_escape(const char bytes[], size_t len, void *user)
 {
   if(bytes[0] >= 0x20 && bytes[0] < 0x30) {
     if(len < 2)
-      return -1;
+      return host_result(-1);
     len = 2;
   }
   else {
@@ -90,7 +97,7 @@ static int parser_escape(const char bytes[], size_t len, void *user)
 
   printf("%sESC %.*s%s", special_begin, (int)len, bytes, special_end);
 
-  return len;
+  return host_result(len);
 }
 
 /* 0     1      2      3       4     5      6      7      8      9      A      B      C      D      E      F    */
@@ -107,7 +114,7 @@ static const int newline_csi_plain[] = {
   0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0,
 };
 
-static int parser_csi(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user)
+static VTermCallbackResult parser_csi(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user)
 {
   const char *name = NULL;
   if(!leader && !intermed && command < 0x70)
@@ -153,10 +160,10 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
   else
     printf(" %c%s", command, special_end);
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_osc(int command, VTermStringFragment frag, void *user)
+static VTermCallbackResult parser_osc(int command, VTermStringFragment frag, void *user)
 {
   if(frag.initial) {
     if(command == -1)
@@ -170,10 +177,10 @@ static int parser_osc(int command, VTermStringFragment frag, void *user)
   if(frag.final)
     printf("%s", special_end);
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_dcs(const char *command, size_t commandlen, VTermStringFragment frag, void *user)
+static VTermCallbackResult parser_dcs(const char *command, size_t commandlen, VTermStringFragment frag, void *user)
 {
   if(frag.initial)
     printf("%sDCS %.*s", special_begin, (int)commandlen, command);
@@ -183,7 +190,7 @@ static int parser_dcs(const char *command, size_t commandlen, VTermStringFragmen
   if(frag.final)
     printf("%s", special_end);
 
-  return 1;
+  return host_result(1);
 }
 
 static VTermParserCallbacks parser_cbs = {
@@ -225,7 +232,7 @@ int main(int argc, char *argv[])
   }
 
   /* Size matters not for the parser */
-  VTerm *vt = vterm_new(25, 80);
+  VTerm *vt = host_new(25, 80);
   vterm_set_utf8(vt, 1);
   vterm_parser_set_callbacks(vt, &parser_cbs, NULL);
   vterm_parser_set_emit_nul(vt, true);
@@ -233,7 +240,7 @@ int main(int argc, char *argv[])
   int len;
   char buffer[1024];
   while((len = read(fd, buffer, sizeof(buffer))) > 0) {
-    vterm_input_write(vt, buffer, len);
+    host_input(vt, buffer, len);
   }
 
   printf("\n");

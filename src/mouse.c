@@ -50,7 +50,7 @@ static void output_mouse(VTermState *state, int code, int pressed, int modifiers
     }
 }
 
-void vterm_mouse_move(VTerm *vt, int row, int col, VTermModifier mod) {
+static void vterm_mouse_move_impl(VTerm *vt, int row, int col, VTermModifier mod) {
     VTermState *state = vt->state;
 
     if (col == state->mouse_col && row == state->mouse_row)
@@ -72,7 +72,17 @@ void vterm_mouse_move(VTerm *vt, int row, int col, VTermModifier mod) {
     }
 }
 
-void vterm_mouse_button(VTerm *vt, int button, bool pressed, VTermModifier mod) {
+VTermStatus vterm_mouse_move(VTerm *vt, int row, int col, VTermModifier mod) {
+    if (row < 0 || col < 0 || row > INT_MAX - 0x21 || col > INT_MAX - 0x21 ||
+        (mod & ~VTERM_ALL_MODS_MASK)) return VTERM_ERR_INVALID_ARGUMENT;
+    if (!vt || !vt->state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(vt);
+    if (vterm_output_flush(vt) != VTERM_OK) return vt_end(vt);
+    vterm_mouse_move_impl(vt, row, col, mod);
+    return vt_end(vt);
+}
+
+static void vterm_mouse_button_impl(VTerm *vt, int button, bool pressed, VTermModifier mod) {
     VTermState *state = vt->state;
 
     int old_buttons = state->mouse_buttons;
@@ -96,4 +106,13 @@ void vterm_mouse_button(VTerm *vt, int button, bool pressed, VTermModifier mod) 
     } else if (button < 8) {
         output_mouse(state, button - 4 + 0x40, pressed, mod, state->mouse_col, state->mouse_row);
     }
+}
+
+VTermStatus vterm_mouse_button(VTerm *vt, int button, bool pressed, VTermModifier mod) {
+    if (button < 1 || button > 7 || (mod & ~VTERM_ALL_MODS_MASK)) return VTERM_ERR_INVALID_ARGUMENT;
+    if (!vt || !vt->state) return VTERM_ERR_INVALID_ARGUMENT;
+    vt_begin(vt);
+    if (vterm_output_flush(vt) != VTERM_OK) return vt_end(vt);
+    vterm_mouse_button_impl(vt, button, pressed, mod);
+    return vt_end(vt);
 }

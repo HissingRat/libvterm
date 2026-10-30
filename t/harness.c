@@ -1,3 +1,5 @@
+#include <stdlib.h>
+#include "../support/host.h"
 #include "vterm.h"
 #include "../src/vterm_internal.h" // We pull in some internal bits too
 
@@ -107,11 +109,12 @@ static VTermScreen *screen;
 
 static VTermEncodingInstance encoding;
 
-static void term_output(const char *s, size_t len, void *user)
+static VTermStatus term_output(const char *s, size_t len, void *user)
 {
   printf("output ");
   for(int i = 0; i < len; i++)
     printf("%x%s", (unsigned char)s[i], i < len-1 ? "," : "\n");
+  return VTERM_OK;
 }
 
 static void printhex(const char *s, size_t len)
@@ -120,7 +123,7 @@ static void printhex(const char *s, size_t len)
     printf("%02x", (uint8_t)(s++)[0]);
 }
 
-static int parser_text(const char bytes[], size_t len, void *user)
+static int parser_text_impl(const char bytes[], size_t len, void *user)
 {
   printf("text ");
   int i;
@@ -134,19 +137,24 @@ static int parser_text(const char bytes[], size_t len, void *user)
 
   return i;
 }
+static VTermStatus parser_text(const char *bytes, size_t len, size_t *consumed, void *user) {
+    *consumed = (size_t)parser_text_impl(bytes, len, user);
+    return VTERM_OK;
+}
 
-static int parser_control(unsigned char control, void *user)
+
+static VTermCallbackResult parser_control(unsigned char control, void *user)
 {
   printf("control %02x\n", control);
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_escape(const char bytes[], size_t len, void *user)
+static VTermCallbackResult parser_escape(const char bytes[], size_t len, void *user)
 {
   if(bytes[0] >= 0x20 && bytes[0] < 0x30) {
     if(len < 2)
-      return -1;
+      return host_result(-1);
     len = 2;
   }
   else {
@@ -157,10 +165,10 @@ static int parser_escape(const char bytes[], size_t len, void *user)
   printhex(bytes, len);
   printf("\n");
 
-  return len;
+  return host_result(len);
 }
 
-static int parser_csi(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user)
+static VTermCallbackResult parser_csi(const char *leader, const long args[], int argcount, const char *intermed, char command, void *user)
 {
   printf("csi %02x", command);
 
@@ -187,10 +195,10 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
 
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_osc(int command, VTermStringFragment frag, void *user)
+static VTermCallbackResult parser_osc(int command, VTermStringFragment frag, void *user)
 {
   printf("osc ");
 
@@ -208,10 +216,10 @@ static int parser_osc(int command, VTermStringFragment frag, void *user)
 
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_dcs(const char *command, size_t commandlen, VTermStringFragment frag, void *user)
+static VTermCallbackResult parser_dcs(const char *command, size_t commandlen, VTermStringFragment frag, void *user)
 {
   printf("dcs ");
 
@@ -228,10 +236,10 @@ static int parser_dcs(const char *command, size_t commandlen, VTermStringFragmen
 
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_apc(VTermStringFragment frag, void *user)
+static VTermCallbackResult parser_apc(VTermStringFragment frag, void *user)
 {
   printf("apc ");
 
@@ -245,10 +253,10 @@ static int parser_apc(VTermStringFragment frag, void *user)
 
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_pm(VTermStringFragment frag, void *user)
+static VTermCallbackResult parser_pm(VTermStringFragment frag, void *user)
 {
   printf("pm ");
 
@@ -262,10 +270,10 @@ static int parser_pm(VTermStringFragment frag, void *user)
 
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
-static int parser_sos(VTermStringFragment frag, void *user)
+static VTermCallbackResult parser_sos(VTermStringFragment frag, void *user)
 {
   printf("sos ");
 
@@ -279,7 +287,7 @@ static int parser_sos(VTermStringFragment frag, void *user)
 
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
 static VTermParserCallbacks parser_cbs = {
@@ -308,92 +316,92 @@ static VTermStateFallbacks fallbacks = {
 
 static int want_movecursor = 0;
 static VTermPos state_pos;
-static int movecursor(VTermPos pos, VTermPos oldpos, int visible, void *user)
+static VTermCallbackResult movecursor(VTermPos pos, VTermPos oldpos, int visible, void *user)
 {
   state_pos = pos;
 
   if(want_movecursor)
     printf("movecursor %d,%d\n", pos.row, pos.col);
 
-  return 1;
+  return host_result(1);
 }
 
 static int want_premove = 0;
-static int premove(VTermRect rect, void *user)
+static VTermCallbackResult premove(VTermRect rect, void *user)
 {
   if(!want_premove)
-    return 0;
+    return host_result(0);
 
   printf("premove %d..%d,%d..%d\n",
       rect.start_row, rect.end_row, rect.start_col, rect.end_col);
 
-  return 1;
+  return host_result(1);
 }
 
 static int want_scrollrect = 0;
-static int scrollrect(VTermRect rect, int downward, int rightward, void *user)
+static VTermCallbackResult scrollrect(VTermRect rect, int downward, int rightward, void *user)
 {
   if(!want_scrollrect)
-    return 0;
+    return host_result(0);
 
   printf("scrollrect %d..%d,%d..%d => %+d,%+d\n",
       rect.start_row, rect.end_row, rect.start_col, rect.end_col,
       downward, rightward);
 
-  return 1;
+  return host_result(1);
 }
 
 static int want_moverect = 0;
-static int moverect(VTermRect dest, VTermRect src, void *user)
+static VTermCallbackResult moverect(VTermRect dest, VTermRect src, void *user)
 {
   if(!want_moverect)
-    return 0;
+    return host_result(0);
 
   printf("moverect %d..%d,%d..%d -> %d..%d,%d..%d\n",
       src.start_row,  src.end_row,  src.start_col,  src.end_col,
       dest.start_row, dest.end_row, dest.start_col, dest.end_col);
 
-  return 1;
+  return host_result(1);
 }
 
 static int want_settermprop = 0;
-static int settermprop(VTermProp prop, VTermValue *val, void *user)
+static VTermCallbackResult settermprop(VTermProp prop, VTermValue *val, void *user)
 {
   if(!want_settermprop)
-    return 1;
+    return host_result(1);
 
   VTermValueType type = vterm_get_prop_type(prop);
   switch(type) {
   case VTERM_VALUETYPE_BOOL:
     printf("settermprop %d %s\n", prop, val->boolean ? "true" : "false");
-    return 1;
+    return host_result(1);
   case VTERM_VALUETYPE_INT:
     printf("settermprop %d %d\n", prop, val->number);
-    return 1;
+    return host_result(1);
   case VTERM_VALUETYPE_STRING:
     printf("settermprop %d %s\"%.*s\"%s\n", prop,
         val->string.initial ? "[" : "", val->string.len, val->string.str, val->string.final ? "]" : "");
-    return 1;
+    return host_result(1);
   case VTERM_VALUETYPE_COLOR:
     printf("settermprop %d ", prop);
     print_color(&val->color);
     printf("\n");
-    return 1;
+    return host_result(1);
 
   case VTERM_N_VALUETYPES:
-    return 0;
+    return host_result(0);
   }
 
-  return 0;
+  return host_result(0);
 }
 
 /* These callbacks are for State */
 
 static int want_state_putglyph = 0;
-static int state_putglyph(VTermGlyphInfo *info, VTermPos pos, void *user)
+static VTermCallbackResult state_putglyph(VTermGlyphInfo *info, VTermPos pos, void *user)
 {
   if(!want_state_putglyph)
-    return 1;
+    return host_result(1);
 
   printf("putglyph ");
   for(int i = 0; i < VTERM_MAX_CHARS_PER_CELL && info->chars[i]; i++)
@@ -407,20 +415,20 @@ static int state_putglyph(VTermGlyphInfo *info, VTermPos pos, void *user)
     printf(" dhl-%s", info->dhl == 1 ? "top" : info->dhl == 2 ? "bottom" : "?" );
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
 static int want_state_erase = 0;
-static int state_erase(VTermRect rect, int selective, void *user)
+static VTermCallbackResult state_erase(VTermRect rect, int selective, void *user)
 {
   if(!want_state_erase)
-    return 1;
+    return host_result(1);
 
   printf("erase %d..%d,%d..%d%s\n",
       rect.start_row, rect.end_row, rect.start_col, rect.end_col,
       selective ? " selective" : "");
 
-  return 1;
+  return host_result(1);
 }
 
 static struct {
@@ -437,7 +445,7 @@ static struct {
   VTermColor foreground;
   VTermColor background;
 } state_pen;
-static int state_setpenattr(VTermAttr attr, VTermValue *val, void *user)
+static VTermCallbackResult state_setpenattr(VTermAttr attr, VTermValue *val, void *user)
 {
   switch(attr) {
   case VTERM_ATTR_BOLD:
@@ -478,24 +486,24 @@ static int state_setpenattr(VTermAttr attr, VTermValue *val, void *user)
     break;
 
   case VTERM_N_ATTRS:
-    return 0;
+    return host_result(0);
   }
 
-  return 1;
+  return host_result(1);
 }
 
-static int state_setlineinfo(int row, const VTermLineInfo *newinfo, const VTermLineInfo *oldinfo, void *user)
+static VTermCallbackResult state_setlineinfo(int row, const VTermLineInfo *newinfo, const VTermLineInfo *oldinfo, void *user)
 {
-  return 1;
+  return host_result(1);
 }
 
 static int want_state_scrollback = 0;
-static int state_sb_clear(void *user) {
+static VTermCallbackResult state_sb_clear(void *user) {
   if(!want_state_scrollback)
-    return 1;
+    return host_result(1);
 
   printf("sb_clear\n");
-  return 0;
+  return host_result(0);
 }
 
 VTermStateCallbacks state_cbs = {
@@ -511,7 +519,7 @@ VTermStateCallbacks state_cbs = {
   .sb_clear    = state_sb_clear,
 };
 
-static int selection_set(VTermSelectionMask mask, VTermStringFragment frag, void *user)
+static VTermCallbackResult selection_set(VTermSelectionMask mask, VTermStringFragment frag, void *user)
 {
   printf("selection-set mask=%04X ", mask);
   if(frag.initial)
@@ -521,14 +529,14 @@ static int selection_set(VTermSelectionMask mask, VTermStringFragment frag, void
     printf("]");
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
-static int selection_query(VTermSelectionMask mask, void *user)
+static VTermCallbackResult selection_query(VTermSelectionMask mask, void *user)
 {
   printf("selection-query mask=%04X\n", mask);
 
-  return 1;
+  return host_result(1);
 }
 
 VTermSelectionCallbacks selection_cbs = {
@@ -538,10 +546,10 @@ VTermSelectionCallbacks selection_cbs = {
 
 static int want_screen_damage = 0;
 static int want_screen_damage_cells = 0;
-static int screen_damage(VTermRect rect, void *user)
+static VTermCallbackResult screen_damage(VTermRect rect, void *user)
 {
   if(!want_screen_damage)
-    return 1;
+    return host_result(1);
 
   printf("damage %d..%d,%d..%d",
       rect.start_row, rect.end_row, rect.start_col, rect.end_col);
@@ -578,14 +586,14 @@ static int screen_damage(VTermRect rect, void *user)
 
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
 static int want_screen_scrollback = 0;
-static int screen_sb_pushline4(int cols, const VTermScreenCell *cells, bool continuation, void *user)
+static VTermCallbackResult screen_sb_pushline4(int cols, const VTermScreenCell *cells, bool continuation, void *user)
 {
   if(!want_screen_scrollback)
-    return 1;
+    return host_result(1);
 
   int eol = cols;
   while(eol && !cells[eol-1].chars[0])
@@ -596,13 +604,13 @@ static int screen_sb_pushline4(int cols, const VTermScreenCell *cells, bool cont
     printf(" %02X", cells[c].chars[0]);
   printf("\n");
 
-  return 1;
+  return host_result(1);
 }
 
-static int screen_sb_popline(int cols, VTermScreenCell *cells, void *user)
+static VTermCallbackResult screen_sb_popline(int cols, VTermScreenCell *cells, void *user)
 {
   if(!want_screen_scrollback)
-    return 0;
+    return host_result(0);
 
   // All lines of scrollback contain "ABCDE"
   for(int col = 0; col < cols; col++) {
@@ -615,16 +623,16 @@ static int screen_sb_popline(int cols, VTermScreenCell *cells, void *user)
   }
 
   printf("sb_popline %d\n", cols);
-  return 1;
+  return host_result(1);
 }
 
-static int screen_sb_clear(void *user)
+static VTermCallbackResult screen_sb_clear(void *user)
 {
   if(!want_screen_scrollback)
-    return 1;
+    return host_result(1);
 
   printf("sb_clear\n");
-  return 0;
+  return host_result(0);
 }
 
 VTermScreenCallbacks screen_cbs = {
@@ -655,7 +663,7 @@ int main(int argc, char **argv)
 
     if(streq(line, "INIT")) {
       if(!vt)
-        vt = vterm_new(25, 80);
+        vt = host_new(25, 80);
 
       vterm_output_set_callback(vt, term_output, NULL);
     }
@@ -668,15 +676,15 @@ int main(int argc, char **argv)
     else if(strstartswith(line, "WANTSTATE") && (line[9] == '\0' || line[9] == ' ')) {
       assert(vt);
       if(!state) {
-        state = vterm_obtain_state(vt);
-        vterm_state_set_callbacks(state, &state_cbs, NULL);
+        state = host_state(vt);
+        host_check(vterm_state_set_callbacks(state, &state_cbs, NULL));
         vterm_state_callbacks_has_premove(state);
         /* In some tests we want to check the behaviour of overflowing the
          * buffer, so make it nicely small
          */
-        vterm_state_set_selection_callbacks(state, &selection_cbs, NULL, NULL, 16);
-        vterm_state_set_bold_highbright(state, 1);
-        vterm_state_reset(state, 1);
+        host_check(vterm_state_set_selection_callbacks(state, &selection_cbs, NULL, NULL, 16));
+        host_check(vterm_state_set_bold_highbright(state, 1));
+        host_check(vterm_state_reset(state, 1));
       }
 
       int i = 9;
@@ -723,7 +731,7 @@ int main(int argc, char **argv)
     else if(strstartswith(line, "WANTSCREEN") && (line[10] == '\0' || line[10] == ' ')) {
       assert(vt);
       if(!screen)
-        screen = vterm_obtain_screen(vt);
+        screen = host_screen(vt);
       vterm_screen_set_callbacks(screen, &screen_cbs, NULL);
       vterm_screen_callbacks_has_pushline4(screen);
 
@@ -737,7 +745,7 @@ int main(int argc, char **argv)
           sense = 0;
           break;
         case 'a':
-          vterm_screen_enable_altscreen(screen, 1);
+          host_check(vterm_screen_enable_altscreen(screen, 1));
           break;
         case 'd':
           want_screen_damage = sense;
@@ -772,11 +780,11 @@ int main(int argc, char **argv)
 
     else if(streq(line, "RESET")) {
       if(state) {
-        vterm_state_reset(state, 1);
+        host_check(vterm_state_reset(state, 1));
         vterm_state_get_cursorpos(state, &state_pos);
       }
       if(screen) {
-        vterm_screen_reset(screen, 1);
+        host_check(vterm_screen_reset(screen, 1));
       }
     }
 
@@ -786,7 +794,7 @@ int main(int argc, char **argv)
       while(linep[0] == ' ')
         linep++;
       sscanf(linep, "%d, %d", &rows, &cols);
-      vterm_set_size(vt, rows, cols);
+      host_check(vterm_set_size(vt, rows, cols));
     }
 
     else if(strstartswith(line, "PUSH ")) {
@@ -794,7 +802,7 @@ int main(int argc, char **argv)
       size_t len = inplace_hex2bytes(bytes);
       assert(len);
 
-      size_t written = vterm_input_write(vt, bytes, len);
+      size_t written = host_input(vt, bytes, len);
       if(written < len)
         fprintf(stderr, "! short write\n");
     }
@@ -817,7 +825,7 @@ int main(int argc, char **argv)
       int cpi = 0;
       size_t pos = 0;
 
-      (*encoding.enc->decode)(encoding.enc, encoding.data,
+      (*encoding.enc->decode)(vt, encoding.enc, encoding.data,
           cp, &cpi, len, bytes, &pos, len);
 
       if(cpi > 0) {
@@ -837,7 +845,7 @@ int main(int argc, char **argv)
       VTermModifier mod = strpe_modifiers(&linep);
       sscanf(linep, " %x", &c);
 
-      vterm_keyboard_unichar(vt, c, mod);
+      host_check(vterm_keyboard_unichar(vt, c, mod));
     }
 
     else if(strstartswith(line, "INKEY ")) {
@@ -849,15 +857,15 @@ int main(int argc, char **argv)
         linep++;
       VTermKey key = strp_key(linep);
 
-      vterm_keyboard_key(vt, key, mod);
+      host_check(vterm_keyboard_key(vt, key, mod));
     }
 
     else if(strstartswith(line, "PASTE ")) {
       char *linep = line + 6;
       if(streq(linep, "START"))
-        vterm_keyboard_start_paste(vt);
+        host_check(vterm_keyboard_start_paste(vt));
       else if(streq(linep, "END"))
-        vterm_keyboard_end_paste(vt);
+        host_check(vterm_keyboard_end_paste(vt));
       else
         goto abort_line;
     }
@@ -866,9 +874,9 @@ int main(int argc, char **argv)
       assert(state);
       char *linep = line + 6;
       if(streq(linep, "IN"))
-        vterm_state_focus_in(state);
+        host_check(vterm_state_focus_in(state));
       else if(streq(linep, "OUT"))
-        vterm_state_focus_out(state);
+        host_check(vterm_state_focus_out(state));
       else
         goto abort_line;
     }
@@ -883,7 +891,7 @@ int main(int argc, char **argv)
       while(linep[0] == ' ')
         linep++;
       VTermModifier mod = strpe_modifiers(&linep);
-      vterm_mouse_move(vt, row, col, mod);
+      host_check(vterm_mouse_move(vt, row, col, mod));
     }
 
     else if(strstartswith(line, "MOUSEBTN ")) {
@@ -897,7 +905,7 @@ int main(int argc, char **argv)
       while(linep[0] == ' ')
         linep++;
       VTermModifier mod = strpe_modifiers(&linep);
-      vterm_mouse_button(vt, button, (press == 'd' || press == 'D'), mod);
+      host_check(vterm_mouse_button(vt, button, (press == 'd' || press == 'D'), mod));
     }
 
     else if(strstartswith(line, "SELECTION ")) {
@@ -926,7 +934,7 @@ int main(int argc, char **argv)
       if(linep[0] == ']') {
         frag.final = true;
       }
-      vterm_state_send_selection(state, mask, frag);
+      host_check(vterm_state_send_selection(state, mask, frag));
     }
 
     else if(strstartswith(line, "DAMAGEMERGE ")) {
@@ -935,18 +943,18 @@ int main(int argc, char **argv)
       while(linep[0] == ' ')
         linep++;
       if(streq(linep, "CELL"))
-        vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_CELL);
+        host_check(vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_CELL));
       else if(streq(linep, "ROW"))
-        vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_ROW);
+        host_check(vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_ROW));
       else if(streq(linep, "SCREEN"))
-        vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_SCREEN);
+        host_check(vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_SCREEN));
       else if(streq(linep, "SCROLL"))
-        vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_SCROLL);
+        host_check(vterm_screen_set_damage_merge(screen, VTERM_DAMAGE_SCROLL));
     }
 
     else if(strstartswith(line, "DAMAGEFLUSH")) {
       assert(screen);
-      vterm_screen_flush_damage(screen);
+      host_check(vterm_screen_flush_damage(screen));
     }
 
     else if(strstartswith(line, "SETDEFAULTCOL ")) {
@@ -960,10 +968,10 @@ int main(int argc, char **argv)
           linep++;
         VTermColor bg = strpe_color(&linep);
 
-        vterm_screen_set_default_colors(screen, &fg, &bg);
+        host_check(vterm_screen_set_default_colors(screen, &fg, &bg));
       }
       else
-        vterm_screen_set_default_colors(screen, &fg, NULL);
+        host_check(vterm_screen_set_default_colors(screen, &fg, NULL));
     }
 
     else if(line[0] == '?') {
